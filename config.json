@@ -1,0 +1,37 @@
+{
+  "_comment": "CoThink driver config. Roles 1 (Strategist) and 8 (Executor) are played by the conductor (Claude) natively; this file configures the engines for roles 2-7.",
+
+  "models": {
+    "codex": "gpt-5.4",
+    "gemini": "",
+    "kimi": ""
+  },
+
+  "_models_note": "Empty string = the CLI's own default model. NOTE: when Codex is authenticated via a ChatGPT account (not an API key), the *-codex models (gpt-5-codex, etc.) are rejected; use a plain chat model such as gpt-5.4.",
+
+  "roles": {
+    "researcher": { "engine": "gemini", "mode": "read_only" },
+    "architect":  { "engine": "kimi",   "mode": "plan" },
+    "coder":      { "engine": "codex",  "mode": "write" },
+    "analyst":    { "engine": "gemini", "mode": "read_only" },
+    "fixer":      { "engine": "codex",  "mode": "write" },
+    "tester":     { "engine": "kimi",   "mode": "write" }
+  },
+
+  "fallbacks": {
+    "codex": "kimi",
+    "gemini": "kimi",
+    "kimi": "gemini"
+  },
+
+  "max_iters": 3,
+  "timeout_seconds": 1800,
+
+  "durable_memory": {
+    "_comment": "Optional: log run summaries/decisions to your OWN context-store REST API across runs. Off by default. Set base_url to your endpoint and export the bearer token in the env var named by token_env.",
+    "enabled": false,
+    "base_url": "",
+    "token_env": "COTHINK_CONTEXT_TOKEN",
+    "project_id": "cothink"
+  }
+}
