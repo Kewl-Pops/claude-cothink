@@ -31,7 +31,7 @@ Each engine has a fallback (`config.json → fallbacks`) so one broken CLI never
    ```
    python3 ~/.claude/skills/cothink/cothink.py run --run-dir "<run_dir>" [--workspace "<path>"]
    ```
-   This runs Researcher → Architect → Coder, then loops Analyst → Fixer → Tester until the Analyst returns `VERDICT: PASS` **and** the Tester returns `RESULT: PASS`, or `max_iters` is hit. It writes numbered artifacts, `run.log`, and `result.json`. It may take several minutes — let it finish. Use `--workspace` to point at an existing project to build into.
+   This runs Researcher → Architect → Coder, then loops Analyst → Fixer → Tester until the Analyst's verdict (`{"verdict": "pass"}`) **and** the Tester's result (`{"result": "pass"}`) both pass, or `max_iters` is hit. The driver parses each role's final fenced JSON block authoritatively and re-prompts a role that gives no parseable verdict. It writes numbered artifacts, `run.log`, and `result.json`. It may take several minutes — let it finish. Use `--workspace` to point at an existing project to build into.
 
 **4. Executor (you).** When the driver finishes, follow `roles/executor.md`: read `result.json` and the final-iteration artifacts, inspect the workspace, then deliver to the user — what was built, how to use it, the run summary (engines per role, iterations, converged or capped), and any open items. **Be honest about non-convergence**: if `status` is `max_iters_reached`, say so and list the Tester's remaining issues; do not claim success.
 
@@ -47,5 +47,6 @@ Each engine has a fallback (`config.json → fallbacks`) so one broken CLI never
 - Runs live under `~/.cothink/runs/<id>/` (override with `COTHINK_HOME`).
 
 ## Setup notes
+- Run `python3 ~/.claude/skills/cothink/cothink.py doctor` once to confirm the engine CLIs (and fallbacks) are installed before the first run.
 - Codex must use a plain chat model (`gpt-5.4`); the `*-codex` models are rejected on ChatGPT-account auth.
 - Durable cross-run memory (shared-context REST) is **off by default**. To enable: set `durable_memory.enabled=true` in `config.json` and export the token in `COTHINK_CONTEXT_TOKEN`.

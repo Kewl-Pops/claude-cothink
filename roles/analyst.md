@@ -21,4 +21,8 @@ Validate correctness. Check logic, security, scalability, compliance, and alignm
 Respond with a single markdown document:
 - `## Defects` — numbered list. For each: severity (BLOCKER/MAJOR/MINOR), the file/location, what's wrong, and a direct recommended fix.
 - `## Criteria check` — go through each of the Strategist's success criteria and mark MET / NOT MET with one line of evidence.
-- End with EXACTLY one line: `VERDICT: PASS` (all criteria met, no BLOCKER/MAJOR defects) or `VERDICT: FAIL`.
+- Then end with your machine-readable verdict as the **last thing in your reply** — a fenced JSON block, nothing after it:
+  ```json
+  {"verdict": "pass"}
+  ```
+  Use `"pass"` only if all criteria are met with no BLOCKER/MAJOR defects; otherwise `"fail"`. The driver reads this block to decide whether the loop continues, so it must be the final, unambiguous line.
