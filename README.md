@@ -15,6 +15,10 @@ Strategist(Claude) → Researcher(Gemini) → Architect(Kimi) → Coder(Codex)
    → Executor(Claude)
 ```
 
+> **Scope:** this repo is the runnable, **coding-focused 8-role distillation** of the broader
+> CoThink methodology. The same idea generalizes to larger role sets for non-code work (writing,
+> strategy, etc.) — this is the lean, installable subset you can run today in Claude Code.
+
 ## The 8 roles
 
 | # | Role | Responsibility | Default engine |
@@ -49,6 +53,16 @@ git clone https://github.com/Kewl-Pops/claude-cothink ~/.claude/skills/cothink
 
 That's it — Claude Code will discover the `cothink` skill. (Use `~/.claude/skills/` for a global
 skill, or `<project>/.claude/skills/` to scope it to one project.)
+
+Then verify the engine CLIs are installed and reachable before your first run:
+
+```bash
+python3 ~/.claude/skills/cothink/cothink.py doctor
+```
+
+`doctor` checks that every CLI the config relies on (primaries **and** fallbacks) is on your PATH,
+prints the role→engine map, and exits non-zero if anything is missing — so you find out up front
+rather than mid-run.
 
 ## Usage
 
@@ -87,9 +101,22 @@ numbered role artifacts, per-iteration `iter-N/` dirs, `run.log`, and `result.js
 
 ## Convergence
 
-The loop stops when the **Analyst** emits `VERDICT: PASS` *and* the **Tester** emits `RESULT: PASS`,
-or when `max_iters` is reached. If it caps out, `result.json.status` is `max_iters_reached` and the
-Executor reports the remaining issues honestly rather than claiming success.
+The loop stops when the **Analyst** passes *and* the **Tester** passes, or when `max_iters` is
+reached. Each emits a machine-readable verdict as the last thing in its reply — a fenced JSON block,
+`{"verdict": "pass"}` (Analyst) / `{"result": "pass"}` (Tester) — which the driver parses
+authoritatively (a legacy `VERDICT: PASS` line is still accepted as a fallback). If a role gives no
+parseable verdict, the driver re-prompts that one role for it rather than guessing, and treats a
+still-missing verdict as a failure so the loop stays conservative. If it caps out,
+`result.json.status` is `max_iters_reached` and the Executor reports the remaining issues honestly
+rather than claiming success.
+
+## Tests
+
+The convergence parser (the line the whole loop hinges on) is covered by `tests/`:
+
+```bash
+python3 -m pytest tests/   # pytest is the only dev dependency; the driver itself is stdlib-only
+```
 
 ## Notes & gotchas
 

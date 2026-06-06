@@ -21,10 +21,19 @@ import datetime
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Engine -> the CLI binary it needs on PATH, and a cheap presence/version probe.
+ENGINE_CLI = {
+    "gemini": (["gemini", "--version"]),
+    "kimi": (["kimi-cli", "--help"]),
+    "codex": (["codex", "--version"]),
+}
+ENGINE_BIN = {"gemini": "gemini", "kimi": "kimi-cli", "codex": "codex"}
 
 SKILL_DIR = Path(__file__).resolve().parent
 ROLES_DIR = SKILL_DIR / "roles"
@@ -179,14 +188,146 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir):
             f"Last error: {last_err}"), "none"
 
 
+# Matches fenced ```json ... ``` blocks (authoritative machine-readable verdict).
+_JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S | re.I)
+
+
+def extract_verdict(text, key):
+    """Read a role's PASS/FAIL signal. Returns 'PASS', 'FAIL', or None (not found).
+
+    Resolution order (most authoritative first):
+      1. The LAST fenced ```json {"<key>": "pass"|"fail"} block.
+      2. A bare trailing JSON object containing <key>.
+      3. The legacy `KEY: PASS/FAIL` line (last match).
+    A None return means the role gave no parseable verdict -- the caller re-prompts
+    for one rather than silently guessing. Prose that merely *mentions* the legacy
+    line never overrides an explicit JSON block, because the JSON is checked first.
+    """
+    text = text or ""
+    k = key.lower()
+
+    # 1 + 2: JSON (fenced blocks first, then any bare object), last wins.
+    candidates = _JSON_FENCE.findall(text)
+    if not candidates:
+        candidates = re.findall(r"\{[^{}]*\}", text)
+    for blob in reversed(candidates):
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            val = next((v for kk, v in obj.items() if kk.lower() == k), None)
+            if isinstance(val, str) and val.strip().upper() in ("PASS", "FAIL"):
+                return val.strip().upper()
+
+    # 3: legacy line.
+    m = re.findall(rf"{key}\s*[:=]\s*(PASS|FAIL)", text, re.I)
+    return m[-1].upper() if m else None
+
+
 def verdict(text, key):
-    m = re.findall(rf"{key}\s*[:=]\s*(PASS|FAIL)", text or "", re.I)
-    return m[-1].upper() if m else "FAIL"  # default FAIL => loop continues (conservative)
+    """Back-compat wrapper: a missing verdict is treated as FAIL (loop continues)."""
+    v = extract_verdict(text, key)
+    return v if v is not None else "FAIL"
+
+
+def resolve_verdict(role, key, out, engine, role_dir, workspace, cfg, timeout, run_dir):
+    """Get a role's PASS/FAIL. If the role emitted no parseable verdict, re-prompt
+    the SAME engine once for a single machine-readable JSON line instead of guessing.
+    """
+    v = extract_verdict(out, key)
+    if v is not None:
+        return v == "PASS"
+    if engine == "none":  # the role itself failed on all engines; stay conservative
+        log(run_dir, f"{role}: no verdict and engine unavailable -> FAIL")
+        return False
+    log(run_dir, f"{role}: no parseable {key} verdict -> re-prompting {engine} for it")
+    prompt = (
+        "Below is your prior analysis. Do not redo the work. Output ONLY a single "
+        f'fenced JSON code block with your final verdict, exactly:\n```json\n'
+        f'{{\"{key.lower()}\": \"pass\"}}\n```\nor\n```json\n'
+        f'{{\"{key.lower()}\": \"fail\"}}\n```\n\n--- prior analysis ---\n' + (out or "")
+    )
+    conf, ok, err = run_engine(engine, prompt, Path(role_dir) / "verdict", workspace,
+                               "read_only", cfg, min(timeout, 300))
+    v = extract_verdict(conf, key)
+    if v is None:
+        log(run_dir, f"{role}: re-prompt still gave no {key} verdict -> FAIL (conservative)")
+        return False
+    log(run_dir, f"{role}: re-prompt verdict={v}")
+    return v == "PASS"
 
 
 # --------------------------------------------------------------------------- #
 # Subcommands
 # --------------------------------------------------------------------------- #
+def cmd_doctor(args):
+    """Preflight: check that every CLI the config relies on is installed, before a run
+    discovers it broken mid-chain. Auth itself is only fully proven by a real call, so
+    this checks presence + a cheap probe and reports the engine map and fallbacks.
+    """
+    cfg = load_config()
+    roles = cfg.get("roles", {})
+    fallbacks = cfg.get("fallbacks", {})
+    models = cfg.get("models", {})
+
+    # Engines actually reachable given the config (primaries + their fallbacks).
+    needed = set()
+    for r in roles.values():
+        eng = r.get("engine")
+        if eng:
+            needed.add(eng)
+            fb = fallbacks.get(eng)
+            if fb:
+                needed.add(fb)
+
+    print("CoThink doctor — environment preflight\n")
+    print("Conductor: Claude Code (plays Strategist + Executor) — run this inside Claude Code.\n")
+
+    rows, all_ok = [], True
+    for eng in sorted(needed):
+        binary = ENGINE_BIN.get(eng, eng)
+        path = shutil.which(binary)
+        if not path:
+            rows.append((eng, binary, "MISSING", "not on PATH"))
+            all_ok = False
+            continue
+        probe = ENGINE_CLI.get(eng, [binary, "--version"])
+        try:
+            p = subprocess.run(probe, capture_output=True, text=True, timeout=20)
+            detail = (p.stdout or p.stderr or "").strip().splitlines()
+            detail = detail[0][:60] if detail else "found"
+            rows.append((eng, binary, "OK", detail))
+        except (subprocess.TimeoutExpired, OSError) as e:
+            rows.append((eng, binary, "WARN", f"probe failed: {e}"))
+
+    w = max(len(r[1]) for r in rows) if rows else 8
+    print(f"{'ENGINE':<8} {'CLI':<{w}} {'STATUS':<8} DETAIL")
+    print("-" * (8 + w + 8 + 24))
+    for eng, binary, status, detail in rows:
+        model = models.get(eng) or "(CLI default)"
+        print(f"{eng:<8} {binary:<{w}} {status:<8} {detail}  [model: {model}]")
+
+    # Role -> engine map for visibility.
+    print("\nRole engine map:")
+    for role, spec in roles.items():
+        print(f"  {role:<11} -> {spec.get('engine')} ({spec.get('mode')})"
+              f"  fallback: {fallbacks.get(spec.get('engine'), '-')}")
+
+    print(f"\nPython: {sys.version.split()[0]}")
+    dm = cfg.get("durable_memory", {})
+    print(f"Durable memory: {'on' if dm.get('enabled') else 'off'}"
+          + (f" ({dm.get('base_url') or 'no base_url set'})" if dm.get("enabled") else ""))
+
+    if all_ok:
+        print("\nAll engines present. Note: auth is only fully verified by a live call;\n"
+              "fallbacks cover an engine that is installed but unauthenticated.")
+    else:
+        print("\nSome engines are MISSING. Install them or set a different engine/fallback\n"
+              "in config.json before running. See README → Requirements.")
+        sys.exit(1)
+
+
 def cmd_init(args):
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + slugify(args.title)
     rd = RUNS_ROOT / rid
@@ -276,7 +417,8 @@ def cmd_run(args):
             "analyst", render("analyst.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=a_prior),
             itdir / "05", workspace, "read_only", cfg, timeout, run_dir)
         (itdir / "05-analyst.md").write_text(analyst)
-        analyst_pass = verdict(analyst, "VERDICT") == "PASS"
+        analyst_pass = resolve_verdict("analyst", "VERDICT", analyst, engines_used["analyst"],
+                                       itdir / "05", workspace, cfg, timeout, run_dir)
 
         # Fixer (only if there is something to fix)
         needs_fix = (not analyst_pass) or (prev_tester is not None and not prev_tester_pass)
@@ -294,7 +436,8 @@ def cmd_run(args):
             "tester", render("tester.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=t_prior),
             itdir / "07", workspace, "write", cfg, timeout, run_dir)
         (itdir / "07-tester.md").write_text(tester)
-        tester_pass = verdict(tester, "RESULT") == "PASS"
+        tester_pass = resolve_verdict("tester", "RESULT", tester, engines_used["tester"],
+                                      itdir / "07", workspace, cfg, timeout, run_dir)
 
         prev_tester, prev_tester_pass = tester, tester_pass
         history.append({"iter": it, "analyst_pass": analyst_pass,
@@ -341,6 +484,9 @@ def main():
     pr.add_argument("--run-dir", required=True)
     pr.add_argument("--workspace", default="", help="defaults to <run-dir>/workspace")
     pr.set_defaults(func=cmd_run)
+
+    pd = sub.add_parser("doctor", help="preflight: check required CLIs are installed/reachable")
+    pd.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     args.func(args)

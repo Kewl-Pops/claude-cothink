@@ -22,4 +22,8 @@ Respond with a single markdown document:
 - `## Tests run` — what you executed (commands, inputs, scenarios) and the observed results.
 - `## Edge & failure cases` — edge/stress/failure paths tried and how the solution behaved.
 - `## Remaining issues` — anything still broken or unstable, with severity and where.
-- End with EXACTLY one line: `RESULT: PASS` (stable, complete, meets criteria) or `RESULT: FAIL`.
+- Then end with your machine-readable result as the **last thing in your reply** — a fenced JSON block, nothing after it:
+  ```json
+  {"result": "pass"}
+  ```
+  Use `"pass"` only if the solution is stable, complete, and meets the criteria; otherwise `"fail"`. The driver reads this block to decide whether the loop continues, so it must be the final, unambiguous line.
