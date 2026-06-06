@@ -106,16 +106,8 @@ Executor reports the remaining issues honestly rather than claiming success.
 
 CoThink divides work into eight single-responsibility roles passed in a chain, keeping context clean
 and reducing drift/hallucination versus monolithic prompting. One role at a time; no role leaks into
-another; the chain repeats until the Strategist's success criteria are met. **The CoThink
-methodology is patented;** see [Patent](#patent).
-
-## Patent
-
-The CoThink methodology is patented by its author. This repository's **MIT license covers the
-source code only** — it does **not** grant any rights under that patent. If you intend to use the
-CoThink *methodology* (as opposed to this code) commercially, evaluate your own patent position.
+another; the chain repeats until the Strategist's success criteria are met.
 
 ## License
 
-[MIT](LICENSE) — for the source code in this repository. See [Patent](#patent) for the separate
-patent note.
+[MIT](LICENSE).
