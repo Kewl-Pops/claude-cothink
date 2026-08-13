@@ -2,26 +2,34 @@
   "_comment": "CoThink driver config. Roles 1 (Strategist) and 8 (Executor) are played by the conductor (Claude) natively; this file configures the engines for roles 2-7.",
 
   "models": {
-    "codex": "gpt-5.4",
+    "codex": "",
     "gemini": "",
-    "kimi": ""
+    "kimi": "",
+    "grok": "",
+    "vibe": "",
+    "qwen": "qwen3-coder-plus"
   },
 
-  "_models_note": "Empty string = the CLI's own default model. NOTE: when Codex is authenticated via a ChatGPT account (not an API key), the *-codex models (gpt-5-codex, etc.) are rejected; use a plain chat model such as gpt-5.4.",
+  "_models_note": "Empty string = the CLI's own default model (recommended — stays current). NOTE: with Codex on a ChatGPT account (not an API key) the *-codex model ids (gpt-5-codex, etc.) are rejected, so leave codex empty and the CLI picks its current default (e.g. gpt-5.6-sol). vibe's model is set in its own config, not via a flag.",
 
   "roles": {
     "researcher": { "engine": "gemini", "mode": "read_only" },
     "architect":  { "engine": "kimi",   "mode": "plan" },
     "coder":      { "engine": "codex",  "mode": "write" },
-    "analyst":    { "engine": "gemini", "mode": "read_only" },
+    "analyst":    { "engine": "qwen",   "mode": "read_only" },
     "fixer":      { "engine": "codex",  "mode": "write" },
     "tester":     { "engine": "kimi",   "mode": "write" }
   },
 
+  "_fallbacks_note": "Ordered fallback chain per engine — if the preferred engine for a role fails, the driver tries these in order. All six engines are available; assign any to any role above.",
+
   "fallbacks": {
-    "codex": "kimi",
-    "gemini": "kimi",
-    "kimi": "gemini"
+    "codex": ["grok", "kimi", "qwen"],
+    "gemini": ["kimi", "grok", "qwen"],
+    "kimi": ["gemini", "grok", "qwen"],
+    "grok": ["codex", "kimi", "qwen"],
+    "vibe": ["kimi", "grok", "qwen"],
+    "qwen": ["codex", "gemini", "kimi"]
   },
 
   "max_iters": 3,

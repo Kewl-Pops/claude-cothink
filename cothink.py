@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""CoThink driver — orchestrates the 8-role methodology across Claude + Gemini + Kimi + Codex.
+"""CoThink driver — orchestrates the 8-role methodology across Claude + Gemini + Kimi + Codex + Grok + Vibe.
 
 Claude (the conductor) plays role 1 (Strategist) and role 8 (Executor) natively and calls
 this driver to run roles 2-7 (Researcher, Architect, Coder, then the Analyst -> Fixer ->
 Tester loop). See SKILL.md for how the conductor drives this.
 
-Engines (validated headless commands):
-  gemini : gemini -p <prompt> -o text --approval-mode {plan|yolo} [--include-directories WS]
-  kimi   : kimi-cli --quiet -w <dir> [--plan] -p <prompt]      (--quiet => clean final message)
-  codex  : codex exec -C <ws> --skip-git-repo-check -m gpt-5.4
-           {--full-auto | -s read-only} --output-last-message <file> <prompt>
-           (NOTE: *-codex models are rejected on ChatGPT-account auth; use a plain chat model.)
+Engines (validated headless commands, verified 2026-08):
+  gemini : gemini --mode {accept-edits|plan} --output-format text [--add-dir WS] -p <prompt>
+  kimi   : kimi --quiet -w <ws> {--yolo|--plan} -p <prompt>          (--quiet => clean final message)
+  codex  : codex exec -C <ws> --skip-git-repo-check -s {workspace-write|read-only}
+           --output-last-message <file> <prompt>   (leave models.codex empty: ChatGPT-account auth
+           rejects *-codex model ids, and the CLI's own default is current, e.g. gpt-5.6-sol)
+  grok   : grok -p <prompt> --output-format plain --no-alt-screen --cwd <ws> [--always-approve]
+  vibe   : vibe -p <prompt> --output text --workdir <ws> {--auto-approve|--agent plan}
 
 Subcommands:
   init   --title "..."                  -> create a run dir, print JSON {run_id, run_dir, ...}
@@ -106,46 +108,77 @@ def _run(cmd, cwd, timeout, out_file=None):
 
 
 def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
-    """mode: 'write' (may edit workspace) | 'read_only' | 'plan' (read-only design)."""
+    """mode: 'write' (may edit workspace) | 'read_only' | 'plan' (read-only design).
+
+    Headless invocations verified 2026-08 against: gemini 1.1.x, kimi 1.49,
+    codex-cli 0.144, grok 1.0, vibe 2.16, qwen 0.21. Each maps mode -> that CLI's own
+    read-only/plan vs auto-approve/write flag, targets the workspace, and returns
+    the model's final text on stdout (codex via --output-last-message).
+    """
     models = cfg.get("models", {})
     role_dir = Path(role_dir)
     role_dir.mkdir(parents=True, exist_ok=True)
     is_write = (mode == "write")
+    ws = str(workspace) if workspace else str(role_dir)
 
     if engine == "gemini":
-        cmd = ["gemini", "-o", "text",
-               "--approval-mode", "yolo" if is_write else "plan"]
+        cmd = ["gemini", "--output-format", "text",
+               "--mode", "accept-edits" if is_write else "plan"]
         if models.get("gemini"):
-            cmd += ["-m", models["gemini"]]
-        if workspace and not is_write:
-            cmd += ["--include-directories", str(workspace)]
+            cmd += ["--model", models["gemini"]]
+        if workspace:
+            cmd += ["--add-dir", str(workspace)]
         cmd += ["-p", prompt]
-        cwd = workspace if (workspace and not is_write) else role_dir
-        out, ok, err = _run(cmd, cwd, timeout)
+        out, ok, err = _run(cmd, ws, timeout)
         return strip_gemini(out), ok, err
 
     if engine == "kimi":
-        wdir = str(workspace) if workspace else str(role_dir)
-        cmd = ["kimi-cli", "--quiet", "-w", wdir]
-        if not is_write:
-            cmd += ["--plan"]
+        cmd = ["kimi", "--quiet", "-w", ws, ("--yolo" if is_write else "--plan")]
         if models.get("kimi"):
             cmd += ["-m", models["kimi"]]
         cmd += ["-p", prompt]
-        out, ok, err = _run(cmd, wdir, timeout)
+        out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
     if engine == "codex":
-        ws = str(workspace) if workspace else str(role_dir)
         out_file = role_dir / "_codex_last.txt"
         if out_file.exists():
             out_file.unlink()
-        cmd = ["codex", "exec", "-C", ws, "--skip-git-repo-check"]
+        cmd = ["codex", "exec", "-C", ws, "--skip-git-repo-check",
+               "-s", ("workspace-write" if is_write else "read-only")]
         if models.get("codex"):
             cmd += ["-m", models["codex"]]
-        cmd += (["--full-auto"] if is_write else ["-s", "read-only"])
         cmd += ["--output-last-message", str(out_file), prompt]
         out, ok, err = _run(cmd, ws, timeout, out_file=str(out_file))
+        return out.strip(), ok, err
+
+    if engine == "grok":
+        cmd = ["grok", "-p", prompt, "--output-format", "plain",
+               "--no-alt-screen", "--cwd", ws]
+        if is_write:
+            cmd += ["--always-approve"]
+        if models.get("grok"):
+            cmd += ["-m", models["grok"]]
+        out, ok, err = _run(cmd, ws, timeout)
+        return out.strip(), ok, err
+
+    if engine == "vibe":
+        cmd = ["vibe", "-p", prompt, "--output", "text", "--workdir", ws,
+               *(["--auto-approve"] if is_write else ["--agent", "plan"])]
+        if models.get("vibe"):
+            cmd += ["--model", models["vibe"]]
+        out, ok, err = _run(cmd, ws, timeout)
+        return out.strip(), ok, err
+
+    if engine == "qwen":
+        # Qwen Code (Gemini-CLI fork). v0.21 flags: -o text, --approval-mode {yolo|plan},
+        # -m model; cwd (ws) is the working dir. Auth via ~/.qwen/.env (OpenAI-compatible).
+        cmd = ["qwen", "-o", "text",
+               "--approval-mode", "yolo" if is_write else "plan"]
+        if models.get("qwen"):
+            cmd += ["-m", models["qwen"]]
+        cmd += ["-p", prompt]
+        out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
     return f"[unknown engine: {engine}]", False, "unknown engine"
@@ -162,8 +195,13 @@ def _looks_failed(out, ok):
 def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir):
     """Run a role on its configured engine, falling back if it fails."""
     pref = cfg["roles"][role]["engine"]
-    fb = cfg.get("fallbacks", {}).get(pref)
-    order = [pref] + ([fb] if fb and fb != pref else [])
+    fb = cfg.get("fallbacks", {}).get(pref, [])
+    if isinstance(fb, str):  # accept a single engine or an ordered chain
+        fb = [fb]
+    order = [pref]
+    for e in fb:
+        if e and e not in order:
+            order.append(e)
     last_err = ""
     for eng in order:
         log(run_dir, f"{role}: {eng} (mode={mode}) ...")
