@@ -166,8 +166,12 @@ or an Analyst and Tester that ended up on the same family after fallbacks).
 - **Codex:** on a ChatGPT account the `*-codex` model ids are rejected, so leave `models.codex`
   empty. Its sandbox blocks network, so it never plays the Researcher.
 - **Gemini** here means the **Antigravity CLI** (`agy`) — the driver uses its flags (`--mode`,
-  `--print-timeout`, `--dangerously-skip-permissions`). The free weekly pool is small; the Flash pin
-  is a quota decision, not a capability one.
+  `--print-timeout`, `--dangerously-skip-permissions`). Headless, its shell tool needs a permission
+  nobody can grant, so a read-only turn that reaches for it is cancelled with empty output; skipping
+  permissions is not the answer because `--mode plan` then writes files (verified). Read-only gemini
+  roles are therefore told the shell is unavailable (file/grep/web tools only) and cannot run tests;
+  write mode skips permissions so it can. The free weekly pool is small; the Flash pin is a quota
+  decision, not a capability one.
 - **Kimi:** `--plan` writes the full blueprint to `~/.kimi/plans/*.md` and prints only a summary; the
   driver harvests the plan file. `--plan` is also porous in print mode (plan exit is auto-approved),
   so read-only seats stay on engines with real deny rules.

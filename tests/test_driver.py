@@ -152,6 +152,8 @@ class CommandShapeTests(unittest.TestCase):
     def test_gemini_timeout_and_write_permissions(self):
         c = self.cmd("gemini", "read_only")
         self.assertIn("--print-timeout", c); self.assertNotIn("--dangerously-skip-permissions", c)
+        self.assertIn("shell/terminal commands are NOT available", c[c.index("-p") + 1])  # read-only: no shell
+        self.assertNotIn("NOT available", self.cmd("gemini", "write")[-1])
         self.assertEqual(c[c.index("--model") + 1], "gemini-3.6-flash-medium")
         self.assertIn("--dangerously-skip-permissions", self.cmd("gemini", "write"))
 

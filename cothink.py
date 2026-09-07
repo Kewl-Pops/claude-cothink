@@ -154,12 +154,18 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return out.strip(), ok, err
 
     if engine == "gemini":
-        # Antigravity CLI (agy) flags. --print-timeout defaults to 5m, far below a role's budget;
-        # in write mode shell/test commands are soft-denied unless permissions are skipped.
+        # Antigravity CLI (agy) flags. --print-timeout defaults to 5m, far below a role's budget.
+        # Headless, the shell ("command") tool needs a permission nobody can grant, so a turn that
+        # reaches for it is CANCELED with empty output. Write mode skips permissions (it needs to
+        # run tests). Read-only mode must NOT: with permissions skipped, --mode plan happily writes
+        # files (verified). So read-only calls keep plan mode and are told the shell is unavailable.
         cmd = ["gemini", "--output-format", "text", "--print-timeout", f"{int(timeout)}s",
                "--mode", "accept-edits" if is_write else "plan"]
         if is_write:
             cmd += ["--dangerously-skip-permissions"]
+        else:
+            prompt = ("NOTE: shell/terminal commands are NOT available in this session — use your file "
+                      "read, grep/search and web tools only; never call a run-command tool.\n\n" + prompt)
         if models.get("gemini"):
             cmd += ["--model", models["gemini"]]
         if workspace:
