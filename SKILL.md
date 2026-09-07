@@ -44,7 +44,7 @@ Builder / validator / tester are three model families (OpenAI / xAI / Moonshot);
 - Stop only when the Executor has delivered the finished asset.
 
 ## Files
-- `cothink.py` — the driver (`init`, `run`). `config.json` — engine map, model pins, per-role fallback chains, families, `max_iters`, durable memory.
+- `cothink.py` — the driver (`init`, `run`). `config.json` — engine map, model pins, per-role fallback chains, families, `max_iters`, `stop_when_blocked`, durable memory.
 - `roles/*.md` — strict role-boundary prompt templates. `lib/context_client.py` — optional durable memory. `tests/` — stdlib unit tests (`python3 -m unittest discover -s tests`).
 - Runs live under `~/.cothink/runs/<id>/` (override with `COTHINK_HOME`).
 

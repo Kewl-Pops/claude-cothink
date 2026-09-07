@@ -89,5 +89,5 @@
     "project_id": "cothink"
   },
   "stop_when_blocked": true,
-  "_stop_when_blocked_note": "Stop the loop early (status=blocked) when the Analyst marks every remaining criterion BLOCKED (zero NOT MET) and the Fixer's `## Not fixed` carries a BLOCKED: line \u2014 two families agreeing that no role in this run can do it."
+  "_stop_when_blocked_note": "Stop the loop early (status=blocked) when the Analyst marks every remaining criterion BLOCKED (zero NOT MET or NOT VERIFIED) and the Fixer's `## Not fixed` carries a BLOCKED: line \u2014 two families agreeing that no role in this run can do it."
 }

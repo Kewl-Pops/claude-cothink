@@ -19,8 +19,9 @@ Run edge cases, stress tests, failure paths, and scenario checks against the bui
 {{WORKSPACE}}
 
 ## Output contract
-Respond with a single markdown document:
+Respond with a single markdown document — no title line; use these exact level-2 `## ` headings:
 - `## Tests run` — first re-run every `Repro:` from the Analyst findings (red/green per ID) and check the blueprint's `## Acceptance tests` exist unaltered and pass; then what else you executed (commands, inputs, scenarios) and the observed results.
 - `## Edge & failure cases` — edge/stress/failure paths tried and how the solution behaved.
-- `## Remaining issues` — numbered `T<n>`: `T<n> BLOCKER|MAJOR|MINOR — file:line — what happened`, on the Analyst's scale (BLOCKER = a criterion NOT MET; MAJOR = a correctness/security defect you demonstrated with a command and its output; MINOR = spec-relevant, non-blocking). Use ONLY these three words. Off-spec notes go under `## Observations`. Prefix `BLOCKED:` to anything no role in this run can resolve from inside the workspace.
-- End with EXACTLY one line: `RESULT: PASS` (every criterion met by a check you executed, no BLOCKER/MAJOR) or `RESULT: FAIL`.
+- `## Remaining issues` — one line per issue: `T<n> BLOCKER|MAJOR|MINOR — file:line — what happened — Repro: <command> → <output you saw>`, on the Analyst's scale (BLOCKER = a criterion NOT MET or a brief Constraint broken by this run's changes; MAJOR = a correctness/security defect the Repro shows red; MINOR = spec-relevant, non-blocking). Use ONLY these three words. Continue numbering from the highest `T<n>` anywhere in PRIOR (`T1` if none); never reuse an ID. For an issue no role in this run can resolve from inside the workspace write `T<n> BLOCKED: <exact failure>` instead of a severity line — the driver keys on `BLOCKED:` at the start of the item. `None` if empty.
+- `## Observations` — off-spec notes (style, pre-existing, Out of scope); no IDs, no severity; advisory.
+- End with EXACTLY one line, plain text (no bold, no backticks): `RESULT: PASS` (every criterion met by a check you executed, no BLOCKER/MAJOR) or `RESULT: FAIL`.

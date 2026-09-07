@@ -22,4 +22,4 @@ Apply corrections based on the Analyst's (and any Tester's) findings. Improve cl
 1. Edit the workspace files to resolve the findings.
 2. Respond with a markdown changelog:
    - `## Fixed` — one bullet per finding ID (`D3`, `T1`): file, what you changed, and the `Repro:` re-run — `green` (quote the output) or `still red`.
-   - `## Not fixed` — one bullet per unresolved ID and why (or "none"). Write `BLOCKED: <exact failure>` when no role in this run can do it from inside this workspace (no network, read-only git, missing service); `OUT OF SCOPE: <why>` when the brief rules it out.
+   - `## Not fixed` — one bullet per unresolved ID and why (or "none"). Write the bullet as `- D<n> BLOCKED: <exact failure>` (the driver keys on this line shape) when no role in this run can do it from inside this workspace (no network, read-only git, missing service); `- D<n> OUT OF SCOPE: <why>` when the brief rules it out.

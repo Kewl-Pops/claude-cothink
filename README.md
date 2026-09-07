@@ -114,7 +114,7 @@ In Claude Code:
 /cothink build a CLI that deduplicates a CSV by a chosen column
 ```
 
-Claude writes a brief, shows you the **objective + success criteria** for a one-time confirmation,
+Claude writes a brief, shows you the **objective, success criteria and out-of-scope list** for a one-time confirmation,
 then runs the full chain and delivers the packaged result with an honest convergence report.
 
 Manual / scripted:
@@ -132,8 +132,8 @@ The brief is the contract every engine is handed: besides Objective, Constraints
 it carries **Out of scope** (what no role may touch or fail on, including pre-existing failures) and
 **Prerequisites** (what the run depends on and you already verified). Criteria must be checkable
 headlessly inside the workspace and judge only what this run changes — see `roles/strategist.md`.
-Analyst and Tester share one severity scale (BLOCKER = criterion NOT MET, MAJOR = a defect shown by a
-`Repro:` command, MINOR) with stable `D<n>`/`T<n>` IDs, park off-spec notes under `## Observations`,
+Analyst and Tester share one severity scale (BLOCKER = criterion NOT MET or a Constraint broken, MAJOR = a defect
+shown by a `Repro:` command, MINOR) with stable `D<n>`/`T<n>` IDs, park off-spec notes under `## Observations`,
 and the Fixer re-runs every Repro it fixes.
 
 Runs are stored under `~/.cothink/runs/<id>/` (override with `COTHINK_HOME`). Each run keeps the
@@ -169,16 +169,18 @@ Executor reports the remaining issues honestly rather than claiming success.
 A third status, `blocked`, means no role in this run could satisfy something: the driver halts before
 the Coder when the Architect's `## Decisions` carries a `BLOCKED: <item>` line (override with
 `run --no-halt-on-blocked`), and stops the loop early when the Analyst marks every remaining
-criterion BLOCKED (zero NOT MET) and the Fixer's `## Not fixed` says `BLOCKED:` too — two families
-agreeing (`stop_when_blocked` in `config.json`). `result.json.blocked` lists the items.
+criterion BLOCKED (zero NOT MET or NOT VERIFIED) and the Fixer's `## Not fixed` says `BLOCKED:` too —
+two families agreeing (`stop_when_blocked` in `config.json`). `result.json.blocked` lists the
+Architect's BLOCKED decisions, the Analyst's BLOCKED criteria lines, then the Fixer's and Tester's
+`BLOCKED:` reasons.
 
 Each iteration the Analyst is handed its previous report and the Fixer changelog since it, so findings
 keep their IDs (`D<n>` / `T<n>`) and are marked FIXED / OPEN / REGRESSED instead of re-discovered. A
 report with no `## Criteria check` or verdict line (e.g. a plan-mode summary) is treated as an engine
 failure and falls through the role's chain (`guard_events: malformed_report`).
 
-`result.json` also lists `engines_used` per role, `brief_lint` (warn-only: missing sections, zero
-numbered criteria) and any `guard_events` (an Analyst that had to run on the builder's family, or an
+`result.json` also lists `engines_used` per role, `brief_lint` (warn-only: a missing `## Objective` /
+`## Success criteria` / `## Out of scope`, or zero numbered criteria) and any `guard_events` (an Analyst that had to run on the builder's family, or an
 Analyst and Tester that ended up on the same family after fallbacks).
 
 ## Notes & gotchas (per engine, all verified headless)

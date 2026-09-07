@@ -23,7 +23,7 @@ Respond with a single markdown document, structured as:
 - `## Facts & Data` — verified facts, figures, API/library specifics relevant to the objective.
 - `## Requirements & Dependencies` — explicit and implied requirements; libraries, services, versions, credentials needed.
 - `## Constraints` — technical, platform, or policy limits that bound the solution.
-- `## Risks & Gaps` — unknowns and hazards. Open questions the Architect can settle by design go here as bullets; anything only the human operator can supply (production data, credentials, an unreachable host, a business decision) goes on its own line as `BLOCKED: <one question>`. Repeat each `[UNVERIFIED]` claim with the lookup or command that would settle it.
+- `## Risks & Gaps` — unknowns and hazards. Open questions the Architect can settle by design go here as bullets; anything only the human operator can supply (production data, credentials, an unreachable host, a business decision) goes on its own line as `BLOCKED: <one question>`. Repeat each `[UNVERIFIED]` claim with the lookup or command that would settle it. Anything the brief's `## Prerequisites` states is already verified by the conductor: cite it as `[src: brief Prerequisites]` and do not re-question it (no `[UNVERIFIED]`, no `BLOCKED:`) unless a probe you ran contradicts it.
 - `## HANDOFF` — a tight bullet summary the Architect can act on directly.
 
 Every claim ends with its source: `[src: file:line]` or `[src: URL]` for a primary source you opened (docs, source, spec — not a blog about them), `[probe: cmd → observed output]` for a one-liner you ran, otherwise `[UNVERIFIED]`. If you were told the shell is unavailable, tag `[UNVERIFIED]` instead of probing.
