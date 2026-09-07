@@ -23,19 +23,19 @@ Builder / validator / tester are three model families (OpenAI / xAI / Moonshot);
 
 ## Procedure — follow in order
 
-**1. Strategist (you).** Turn the user's request into a brief. Read `roles/strategist.md` for the exact template. Then:
+**1. Strategist (you).** Turn the user's request into a brief. Read `roles/strategist.md` for the exact template and its **Before you write** checks (one slice per run, brownfield baseline, spec mapping, questions only the user can answer). Then:
    - Run `python3 ~/.claude/skills/cothink/cothink.py init --title "<short title>"`. It prints JSON with `run_dir`, `workspace`, and `brief_path`.
    - Write your brief to `brief_path` (the `brief.md`). The **Success criteria** section is the bar the loop converges to — make every criterion objectively checkable (e.g. "`pytest` passes", "returns X for input Y"). If the deliverable is code, build it in `workspace` (or set a different path with `--workspace`).
 
-**2. THE ONE GATE.** Show the user the **Objective** and **Success criteria** from your brief and ask them to confirm or adjust. This is the only stop. (If the user has said "just go" / "do it all", proceed without waiting.)
+**2. THE ONE GATE.** Show the user the **Objective**, **Success criteria** and **Out of scope** from your brief (and the ordered slice list, if you split the request) and ask them to confirm or adjust. This is the only stop. (If the user has said "just go" / "do it all", proceed without waiting.)
 
 **3. Run roles 2–7.** Execute:
    ```
    python3 ~/.claude/skills/cothink/cothink.py run --run-dir "<run_dir>" [--workspace "<path>"]
    ```
-   This runs Researcher → Architect → Coder, then loops Analyst → Fixer → Tester until the Analyst returns `VERDICT: PASS` **and** the Tester returns `RESULT: PASS`, or `max_iters` is hit. It writes numbered artifacts, `run.log`, and `result.json`. It may take several minutes — let it finish. Use `--workspace` to point at an existing project to build into.
+   This runs Researcher → Architect → Coder, then loops Analyst → Fixer → Tester until the Analyst returns `VERDICT: PASS` **and** the Tester returns `RESULT: PASS`, or `max_iters` is hit. It halts before the Coder (`status: blocked`) if the Architect's `## Decisions` carries a `BLOCKED:` line, and stops the loop early when the Analyst and Fixer agree every remaining failure is environment-blocked (`--no-halt-on-blocked` / `stop_when_blocked` override). It writes numbered artifacts, `run.log`, and `result.json`. It may take several minutes — let it finish. Use `--workspace` to point at an existing project to build into.
 
-**4. Executor (you).** When the driver finishes, follow `roles/executor.md`: read `result.json` and the final-iteration artifacts, inspect the workspace, then deliver to the user — what was built, how to use it, the run summary (engines per role, iterations, converged or capped), and any open items. **Be honest about non-convergence**: if `status` is `max_iters_reached`, say so and list the Tester's remaining issues; do not claim success.
+**4. Executor (you).** When the driver finishes, follow `roles/executor.md`: read `result.json` and the final-iteration artifacts, inspect the workspace, then deliver to the user — what was built, how to use it, the run summary (engines per role, iterations, converged or capped), and any open items. **Be honest about non-convergence**: if `status` is `max_iters_reached`, say so and list the Tester's remaining issues; do not claim success. If `status` is `blocked`, lead with `result.json.blocked`: no engine could satisfy those items — the user must resolve them (or move the criterion to Out of scope) and re-run; do not describe it as a failed build. Finish with the one-line retro pointer (`retro.md`).
 
 ## Rules (the methodology)
 - **One role at a time. No role leaks into another.** The role templates in `roles/` enforce this — don't loosen them.

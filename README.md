@@ -128,6 +128,14 @@ python3 ~/.claude/skills/cothink/cothink.py init --title "csv-deduper"
 python3 ~/.claude/skills/cothink/cothink.py run --run-dir <run_dir> [--workspace <path>]
 ```
 
+The brief is the contract every engine is handed: besides Objective, Constraints and Success criteria
+it carries **Out of scope** (what no role may touch or fail on, including pre-existing failures) and
+**Prerequisites** (what the run depends on and you already verified). Criteria must be checkable
+headlessly inside the workspace and judge only what this run changes — see `roles/strategist.md`.
+Analyst and Tester share one severity scale (BLOCKER = criterion NOT MET, MAJOR = a defect shown by a
+`Repro:` command, MINOR) with stable `D<n>`/`T<n>` IDs, park off-spec notes under `## Observations`,
+and the Fixer re-runs every Repro it fixes.
+
 Runs are stored under `~/.cothink/runs/<id>/` (override with `COTHINK_HOME`). Each run keeps the
 numbered role artifacts, per-iteration `iter-N/` dirs, `run.log`, and `result.json`. Point
 `--workspace` at an existing project for brownfield work — every role, including the Researcher and
@@ -145,6 +153,9 @@ Architect, gets read access to it.
   CoThink's Codex spend doesn't inherit an `xhigh` account default. Empty = inherit.
 - `vibe_max_price_usd` — hard per-call USD cap for vibe, the only pay-per-token engine with one.
 - `max_iters` — cap on the Analyst→Fixer→Tester loop (default `3`).
+- `stop_when_blocked` — stop the loop early with `status: blocked` when the Analyst and Fixer agree every
+  remaining failure is environment-blocked (default `true`). `run --no-halt-on-blocked` keeps building
+  past an Architect `BLOCKED:` decision.
 - `timeout_seconds` — per-role timeout (default `1800`).
 - `durable_memory` — optional: log run summaries to *your own* context-store REST API across runs.
   Off by default. Set `base_url` and export your token in the env var named by `token_env`.
@@ -153,9 +164,22 @@ Architect, gets read access to it.
 
 The loop stops when the **Analyst** emits `VERDICT: PASS` *and* the **Tester** emits `RESULT: PASS`,
 or when `max_iters` is reached. If it caps out, `result.json.status` is `max_iters_reached` and the
-Executor reports the remaining issues honestly rather than claiming success. `result.json` also lists
-`engines_used` per role and any `guard_events` (an Analyst that had to run on the builder's family,
-or an Analyst and Tester that ended up on the same family after fallbacks).
+Executor reports the remaining issues honestly rather than claiming success.
+
+A third status, `blocked`, means no role in this run could satisfy something: the driver halts before
+the Coder when the Architect's `## Decisions` carries a `BLOCKED: <item>` line (override with
+`run --no-halt-on-blocked`), and stops the loop early when the Analyst marks every remaining
+criterion BLOCKED (zero NOT MET) and the Fixer's `## Not fixed` says `BLOCKED:` too — two families
+agreeing (`stop_when_blocked` in `config.json`). `result.json.blocked` lists the items.
+
+Each iteration the Analyst is handed its previous report and the Fixer changelog since it, so findings
+keep their IDs (`D<n>` / `T<n>`) and are marked FIXED / OPEN / REGRESSED instead of re-discovered. A
+report with no `## Criteria check` or verdict line (e.g. a plan-mode summary) is treated as an engine
+failure and falls through the role's chain (`guard_events: malformed_report`).
+
+`result.json` also lists `engines_used` per role, `brief_lint` (warn-only: missing sections, zero
+numbered criteria) and any `guard_events` (an Analyst that had to run on the builder's family, or an
+Analyst and Tester that ended up on the same family after fallbacks).
 
 ## Notes & gotchas (per engine, all verified headless)
 
@@ -190,7 +214,8 @@ python3 -m unittest discover -s tests
 ```
 
 Stdlib `unittest`; no network — engine calls are stubbed. Covers the per-role chains, the family
-guard, config-driven modes, verdict parsing, and the exact command shape sent to each CLI.
+guard, config-driven modes, verdict parsing, the exact command shape sent to each CLI, and the loop
+mechanics (fixed point feed-forward, shape gate, `BLOCKED` halt/stall, brief lint).
 
 ## CoThink methodology
 
