@@ -97,8 +97,10 @@ def strip_gemini(text):
 # --------------------------------------------------------------------------- #
 def _run(cmd, cwd, timeout, out_file=None):
     try:
+        # Never inherit stdin: `codex exec` blocks forever ("Reading additional input from
+        # stdin...") when it sees an open non-TTY pipe, e.g. when the driver runs in the background.
         p = subprocess.run(cmd, cwd=str(cwd), capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return "", False, f"timeout after {timeout}s"
     except FileNotFoundError as e:
@@ -329,6 +331,23 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
             f"Last error: {last_err}"), "none"
 
 
+def family_overlap_events(cfg, engines_used, it):
+    """Correlated-verdict notes for one iteration: the Tester sharing a model family with the
+    Analyst, or with whoever actually wrote the code (Coder/Fixer). Soft losses — logged, never fatal."""
+    ev = []
+    t = engines_used.get("tester")
+    if not t or t == "none":
+        return ev
+    tf = _family(cfg, t)
+    a = engines_used.get("analyst")
+    if a and a != "none" and _family(cfg, a) == tf:
+        ev.append({"role": "tester", "engine": t, "event": "analyst_tester_same_family", "iter": it})
+    writers = [e for e in (engines_used.get("coder"), engines_used.get("fixer")) if e and e != "none"]
+    if any(_family(cfg, w) == tf for w in writers):
+        ev.append({"role": "tester", "engine": t, "event": "writer_tester_same_family", "iter": it})
+    return ev
+
+
 def verdict(text, key):
     m = re.findall(rf"{key}\s*[:=]\s*(PASS|FAIL)", text or "", re.I)
     return m[-1].upper() if m else "FAIL"  # default FAIL => loop continues (conservative)
@@ -451,12 +470,10 @@ def cmd_run(args):
             itdir / "07", workspace, "write", cfg, timeout, run_dir)
         (itdir / "07-tester.md").write_text(tester)
         tester_pass = verdict(tester, "RESULT") == "PASS"
-        if (engines_used["tester"] != "none" and engines_used["analyst"] != "none"
-                and _family(cfg, engines_used["tester"]) == _family(cfg, engines_used["analyst"])):
-            log(run_dir, f"iter {it}: NOTE Analyst ({engines_used['analyst']}) and Tester "
-                         f"({engines_used['tester']}) share a model family — the two verdicts are correlated")
-            events.append({"role": "tester", "engine": engines_used["tester"],
-                           "event": "analyst_tester_same_family", "iter": it})
+        for ev in family_overlap_events(cfg, engines_used, it):
+            log(run_dir, f"iter {it}: NOTE {ev['event'].replace('_', ' ')} ({ev['engine']}) — "
+                         f"the verdicts are correlated, not independent")
+            events.append(ev)
 
         prev_tester, prev_tester_pass = tester, tester_pass
         history.append({"iter": it, "analyst_pass": analyst_pass,

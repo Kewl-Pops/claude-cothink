@@ -101,6 +101,31 @@ class ChainTests(unittest.TestCase):
         self.assertIn("failed on all engines", out)
 
 
+class OverlapAndSubprocessTests(unittest.TestCase):
+    def test_family_overlap_events(self):
+        ev = cothink.family_overlap_events(REPO_CFG, {"coder": "kimi", "analyst": "grok", "tester": "kimi"}, 1)
+        self.assertEqual([e["event"] for e in ev], ["writer_tester_same_family"])
+        ev = cothink.family_overlap_events(REPO_CFG, {"coder": "codex", "analyst": "grok", "tester": "grok"}, 2)
+        self.assertEqual([e["event"] for e in ev], ["analyst_tester_same_family"])
+        self.assertEqual(cothink.family_overlap_events(REPO_CFG, {"coder": "codex", "analyst": "grok", "tester": "kimi"}, 1), [])
+        self.assertEqual(cothink.family_overlap_events(REPO_CFG, {"coder": "codex", "analyst": "grok", "tester": "none"}, 1), [])
+
+    def test_run_never_inherits_stdin(self):
+        # codex exec blocks on an open non-TTY stdin ("Reading additional input from stdin...")
+        seen = {}
+        orig = cothink.subprocess.run
+        def fake(cmd, **kw):
+            seen.update(kw)
+            class P: stdout, stderr, returncode = "x", "", 0
+            return P()
+        cothink.subprocess.run = fake
+        try:
+            cothink._run(["true"], ".", 5)
+        finally:
+            cothink.subprocess.run = orig
+        self.assertIs(seen.get("stdin"), cothink.subprocess.DEVNULL)
+
+
 class VerdictTests(unittest.TestCase):
     def test_last_verdict_wins_and_default_is_fail(self):
         self.assertEqual(cothink.verdict("VERDICT: PASS\n...\nVERDICT: FAIL", "VERDICT"), "FAIL")
