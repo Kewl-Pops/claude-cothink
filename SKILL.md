@@ -44,11 +44,12 @@ Builder / validator / tester are three model families (OpenAI / xAI / Moonshot);
 - Stop only when the Executor has delivered the finished asset.
 
 ## Files
-- `cothink.py` — the driver (`init`, `run`). `config.json` — engine map, model pins, per-role fallback chains, families, `max_iters`, `stop_when_blocked`, durable memory.
+- `cothink.py` — the driver (`init`, `run`, `doctor`). `config.json` — engine map, model pins, per-role fallback chains, families, `max_iters`, `stop_when_blocked`, durable memory.
 - `roles/*.md` — strict role-boundary prompt templates. `lib/context_client.py` — optional durable memory. `tests/` — stdlib unit tests (`python3 -m unittest discover -s tests`).
 - Runs live under `~/.cothink/runs/<id>/` (override with `COTHINK_HOME`).
 
 ## Setup notes
+- Run `python3 ~/.claude/skills/cothink/cothink.py doctor` once (and after editing `config.json`): it verifies every engine in the chains is installed and that the role map keeps the builder's family out of the judgment seats, without spending tokens.
 - The driver reads `config.json` **from the directory it runs in** (`~/.claude/skills/cothink/`). Edits to a checkout elsewhere do nothing until copied there.
 - Leave `models.codex` empty (ChatGPT-account auth rejects `*-codex` ids; the CLI default is current). Keep `models.claude` a **full** id — aliases resolve inconsistently across fleet accounts. `models.gemini` is pinned to Flash to protect the small Antigravity weekly pool.
 - `codex_reasoning_effort` is applied per call (`-c model_reasoning_effort=…`), leaving account configs alone. `vibe_max_price_usd` caps vibe's real-dollar spend per call.

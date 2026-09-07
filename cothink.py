@@ -22,6 +22,7 @@ Run statuses: passed | max_iters_reached | blocked (halted before the Coder on a
 environment-blocked and the Fixer agreeing under `## Not fixed`).
 
 Subcommands:
+  doctor [--json]                       -> preflight: CLIs on PATH, model pins, role map, config invariants
   init   --title "..."                  -> create a run dir, print JSON {run_id, run_dir, ...}
   run    --run-dir DIR [--workspace WS] [--no-halt-on-blocked] -> run roles 2-7; writes artifacts + result.json
 """
@@ -210,6 +211,33 @@ def strip_gemini(text):
 # --------------------------------------------------------------------------- #
 # Engine invocation
 # --------------------------------------------------------------------------- #
+# Engine -> (dispatcher-first binary candidates, env override). run_engine and doctor resolve
+# binaries through engine_binary() so the preflight checks exactly what a run would exec.
+ENGINE_BINS = {
+    "claude": (["claude-acct", "claude"], "COTHINK_CLAUDE_BIN"),
+    "codex": (["codex-acct", "codex"], "COTHINK_CODEX_BIN"),
+    "gemini": (["gemini"], None),   # the Antigravity CLI must be exposed as `gemini` (agy alone is not enough)
+    "kimi": (["kimi"], None),
+    "grok": (["grok"], None),
+    "vibe": (["vibe"], None),
+    "qwen": (["qwen"], None),
+}
+# what a dispatcher wraps, for --version probes that must not route/spend anything
+DISPATCHER_UNDERLYING = {"claude-acct": ("CLAUDE_ACCT_BIN", "claude"), "codex-acct": ("CODEX_ACCT_BIN", "codex")}
+
+
+def engine_binary(engine, env=os.environ, which=shutil.which):
+    """argv[0] a run would exec for this engine: the env override if set, else the first candidate
+    on PATH (dispatchers first), else the plain name (so a missing CLI fails visibly at exec)."""
+    cands, env_key = ENGINE_BINS.get(engine, ([engine], None))
+    if env_key and env.get(env_key):
+        return env[env_key]
+    for c in cands:
+        if which(c):
+            return c
+    return cands[-1]
+
+
 def _run(cmd, cwd, timeout, out_file=None):
     try:
         # Never inherit stdin: `codex exec` blocks forever ("Reading additional input from
@@ -249,7 +277,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         # Isolation: no session written to the (shared) session store, no MCP servers, no
         # user/project settings or hooks leaking in from the conductor's own setup.
         # IS_SANDBOX=1 is the documented hatch that lets --dangerously-skip-permissions run as root.
-        claude_bin = os.environ.get("COTHINK_CLAUDE_BIN") or ("claude-acct" if shutil.which("claude-acct") else "claude")
+        claude_bin = engine_binary("claude")
         cmd = ["env", "IS_SANDBOX=1", claude_bin, "-p", prompt, "--output-format", "text",
                "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]
         if is_write:
@@ -325,7 +353,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
             out_file.unlink()
         # Route through the codex-acct dispatcher when installed (spreads load across the
         # ChatGPT accounts); COTHINK_CODEX_BIN overrides; plain `codex` otherwise.
-        codex_bin = os.environ.get("COTHINK_CODEX_BIN") or ("codex-acct" if shutil.which("codex-acct") else "codex")
+        codex_bin = engine_binary("codex")
         cmd = [codex_bin, "exec", "-C", ws, "--skip-git-repo-check",
                "-s", ("workspace-write" if is_write else "read-only")]
         effort = cfg.get("codex_reasoning_effort")
@@ -493,6 +521,141 @@ def verdict(text, key):
 # --------------------------------------------------------------------------- #
 # Subcommands
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# doctor — preflight
+# --------------------------------------------------------------------------- #
+MODES = ("read_only", "plan", "write")
+
+
+def doctor_report(cfg, which=shutil.which, run=subprocess.run, env=os.environ):
+    """Preflight without spending tokens: every engine the config can reach (primaries and
+    per-role chains) is on PATH and answers --version; model pins look sane; the role map keeps
+    the builder/validator families apart. Returns a dict; `ok` is False on anything that would
+    break or silently weaken a run (a missing PRIMARY, an unknown engine, a family collision)."""
+    roles = cfg.get("roles", {})
+    families = cfg.get("families", {})
+    models = cfg.get("models", {})
+    problems, warnings = [], []
+
+    def chain(role):
+        try:
+            return role_chain(cfg, role)
+        except KeyError:
+            return []
+
+    needed = {}
+    for role, rc in roles.items():
+        for i, eng in enumerate(chain(role)):
+            needed.setdefault(eng, set()).add(("primary" if i == 0 else "fallback", role))
+
+    engines = []
+    for eng in sorted(needed):
+        binary = engine_binary(eng, env=env, which=which)   # exactly what run_engine would exec
+        path = which(binary)
+        detail = None
+        if path:
+            # probe the CLI itself, never through a dispatcher (that would route and bump its state)
+            probe_bin, via = binary, ""
+            if os.path.basename(binary) in DISPATCHER_UNDERLYING:
+                env_key, default = DISPATCHER_UNDERLYING[os.path.basename(binary)]
+                probe_bin, via = env.get(env_key, default), f" via {os.path.basename(binary)}"
+            try:
+                pr = run([probe_bin, "--version"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+                first = ((pr.stdout or pr.stderr or "").strip().splitlines() or ["found"])[0][:60]
+                detail = (first if pr.returncode == 0 else f"exit {pr.returncode}: {first}") + via
+            except (subprocess.TimeoutExpired, OSError) as e:
+                detail = f"probe failed: {e}{via}"
+        uses = sorted(needed[eng])
+        is_primary = any(k == "primary" for k, _ in uses)
+        status = "OK" if path else "MISSING"
+        if not path:
+            cands = ENGINE_BINS.get(eng, ([eng], None))[0]
+            hint = " (agy is installed — expose it as `gemini`, e.g. a shim or symlink)" if eng == "gemini" and which("agy") else ""
+            (problems if is_primary else warnings).append(
+                f"{eng}: not on PATH (tried {', '.join(cands)}){hint} — "
+                + ("primary for " + ", ".join(r for k, r in uses if k == "primary") if is_primary
+                   else "fallback only (" + ", ".join(r for _, r in uses) + ")"))
+        if eng not in families:
+            problems.append(f"{eng}: referenced by roles but missing from config.families")
+        if eng not in ENGINE_BINS:
+            problems.append(f"{eng}: unknown engine (no run_engine branch)")
+        engines.append({"engine": eng, "binary": path or binary, "status": status, "detail": detail or "",
+                        "model": models.get(eng) or "(CLI default)", "family": families.get(eng, "?"),
+                        "roles": [f"{r} ({k})" for k, r in uses]})
+
+    # every chain needs at least one installed engine
+    for role in roles:
+        ch = chain(role)
+        if ch and not any(e["status"] == "OK" for e in engines if e["engine"] in ch):
+            problems.append(f"{role}: no engine in its chain is installed ({', '.join(ch)})")
+    for role, rc in roles.items():
+        if rc.get("mode") not in MODES:
+            problems.append(f"{role}: mode {rc.get('mode')!r} is not one of {MODES}")
+
+    # family independence: no writer's family (Coder or Fixer primary) may sit in a judgment seat
+    fam = lambda e: families.get(e, e)
+    writers = {roles.get(r, {}).get("engine") for r in ("coder", "fixer")} - {None}
+    for role in ("analyst", "tester"):
+        for w in sorted(writers):
+            same = [e for e in chain(role) if fam(e) == fam(w)]
+            if same:
+                primary_hit = roles.get(role, {}).get("engine") in same
+                (problems if primary_hit else warnings).append(
+                    f"{role}: chain contains {', '.join(same)} — same family ({fam(w)}) as the {'Coder' if w == roles.get('coder', {}).get('engine') else 'Fixer'} ({w})"
+                    + ("" if primary_hit else " (fallback only; the runtime guard skips it)"))
+
+    # model pins
+    cm = models.get("claude") or ""
+    if cm and not re.match(r"^claude-[a-z]+-\d", cm):
+        warnings.append(f"models.claude={cm!r} looks like an alias — aliases resolve inconsistently across accounts; pin a full id")
+    if (models.get("codex") or "").endswith("-codex"):
+        warnings.append("models.codex ends with -codex: ChatGPT-account auth rejects those ids")
+    if models.get("vibe"):
+        warnings.append("models.vibe is ignored (vibe has no --model flag; set it in ~/.vibe/config.toml)")
+
+    return {
+        "ok": not problems, "problems": problems, "warnings": warnings, "engines": engines,
+        "roles": {r: {"engine": rc.get("engine"), "mode": rc.get("mode"), "chain": chain(r)} for r, rc in roles.items()},
+        "settings": {"max_iters": cfg.get("max_iters"), "timeout_seconds": cfg.get("timeout_seconds"),
+                     "stop_when_blocked": cfg.get("stop_when_blocked", True),
+                     "codex_reasoning_effort": cfg.get("codex_reasoning_effort"),
+                     "vibe_max_price_usd": cfg.get("vibe_max_price_usd"),
+                     "durable_memory": bool(cfg.get("durable_memory", {}).get("enabled"))},
+        "python": sys.version.split()[0],
+        "skill_dir": str(SKILL_DIR),
+    }
+
+
+def cmd_doctor(args):
+    rep = doctor_report(load_config())
+    if getattr(args, "json", False):
+        print(json.dumps(rep, indent=2))
+        sys.exit(0 if rep["ok"] else 1)
+    print(f"CoThink doctor — preflight for {rep['skill_dir']} (python {rep['python']})")
+    print("Conductor: Claude Code plays Strategist + Executor; the engines below play roles 2-7.\n")
+    w = max(len(e["binary"]) for e in rep["engines"]) if rep["engines"] else 8
+    print(f"{'ENGINE':<8} {'CLI':<{w}} {'STATUS':<8} {'FAMILY':<10} {'MODEL':<26} DETAIL / ROLES")
+    for e in rep["engines"]:
+        print(f"{e['engine']:<8} {e['binary']:<{w}} {e['status']:<8} {e['family']:<10} {e['model'][:26]:<26} "
+              f"{e['detail']}  [{', '.join(e['roles'])}]")
+    print("\nRoles:")
+    for r, spec in rep["roles"].items():
+        print(f"  {r:<11} {spec['engine']} ({spec['mode']})  chain: {' -> '.join(spec['chain'])}")
+    s = rep["settings"]
+    print(f"\nSettings: max_iters={s['max_iters']} timeout={s['timeout_seconds']}s stop_when_blocked={s['stop_when_blocked']} "
+          f"codex_effort={s['codex_reasoning_effort']} vibe_cap=${s['vibe_max_price_usd']} durable_memory={'on' if s['durable_memory'] else 'off'}")
+    for msg in rep["warnings"]:
+        print(f"WARN  {msg}")
+    for msg in rep["problems"]:
+        print(f"FAIL  {msg}")
+    if rep["ok"]:
+        print("\nOK — every primary engine is installed and the role map keeps builder and judges apart. "
+              "(Auth is only proven by a live call; a fallback chain covers an installed-but-logged-out CLI.)")
+    else:
+        print("\nFix the FAIL lines in config.json or install the missing CLIs before running.")
+        sys.exit(1)
+
+
 def cmd_init(args):
     rid = time.strftime("%Y%m%d-%H%M%S") + "-" + slugify(args.title)
     rd = RUNS_ROOT / rid
@@ -715,6 +878,10 @@ def main():
     pr.add_argument("--no-halt-on-blocked", action="store_true",
                     help="record the Architect's BLOCKED items in result.json but keep building")
     pr.set_defaults(func=cmd_run)
+
+    pd = sub.add_parser("doctor", help="preflight: engine CLIs on PATH, model pins, role map, config invariants")
+    pd.add_argument("--json", action="store_true", help="machine-readable report")
+    pd.set_defaults(func=cmd_doctor)
 
     args = ap.parse_args()
     args.func(args)

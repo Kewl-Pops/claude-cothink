@@ -20,6 +20,11 @@ Strategist(Claude Code) → Researcher(Gemini) → Architect(Claude) → Coder(C
    → Executor(Claude Code)
 ```
 
+> **Scope:** this repo is the runnable, **coding-focused 8-role distillation** of the broader
+> CoThink methodology: success criteria must be checkable headlessly inside a workspace, and the
+> Analyst/Tester contracts assume runnable code (`file:line`, `Repro:`). It is the lean, installable
+> subset you can run today in Claude Code.
+
 ## The 8 roles
 
 | # | Role | Responsibility | Default engine | Fallback chain |
@@ -89,7 +94,7 @@ fleet dispatchers).
 - [`grok`](https://docs.x.ai/) (Grok CLI) — logged in
 - [`vibe`](https://github.com/mistralai/mistral-vibe) — `MISTRAL_API_KEY` set
 - [`qwen`](https://github.com/QwenLM/qwen-code) — provider key in `~/.qwen/.env`
-- Python 3.8+ (standard library only — no pip dependencies)
+- Python 3.10+ (standard library only — no pip dependencies)
 
 Any engine you don't have can simply be left out of `config.json`; each role's fallback chain keeps
 a run alive when one CLI is missing, broken, or out of quota.
@@ -105,6 +110,21 @@ git clone https://github.com/Kewl-Pops/claude-cothink ~/.claude/skills/cothink
 That's it — Claude Code will discover the `cothink` skill. (Use `~/.claude/skills/` for a global
 skill, or `<project>/.claude/skills/` to scope it to one project.) The driver reads `config.json`
 from the directory it lives in, so edit the installed copy.
+
+Then run the preflight once, and again after any `config.json` change:
+
+```bash
+python3 ~/.claude/skills/cothink/cothink.py doctor        # add --json for a machine-readable report
+```
+
+`doctor` spends no tokens. It checks that every engine the config can reach (primaries **and**
+per-role fallback chains, dispatchers first) is on `PATH` and that the underlying CLI answers
+`--version` (probed directly, never through the fleet dispatchers), prints the
+role → engine map with each chain, and enforces the config invariants: every referenced engine
+has a family, every chain has at least one installed engine, no judgment seat (Analyst, Tester)
+sits on the Coder's family, and model pins look sane (a full Claude id, no `*-codex` id, no
+`models.vibe`). A missing **primary** or a broken invariant exits non-zero; a missing fallback is
+a warning. Auth is only proven by a live call — a fallback chain covers an installed-but-logged-out CLI.
 
 ## Usage
 
@@ -216,8 +236,9 @@ python3 -m unittest discover -s tests
 ```
 
 Stdlib `unittest`; no network — engine calls are stubbed. Covers the per-role chains, the family
-guard, config-driven modes, verdict parsing, the exact command shape sent to each CLI, and the loop
-mechanics (fixed point feed-forward, shape gate, `BLOCKED` halt/stall, brief lint).
+guard, config-driven modes, verdict parsing, the exact command shape sent to each CLI, the loop
+mechanics (fixed point feed-forward, shape gate, `BLOCKED` halt/stall, brief lint), and `doctor`.
+The same command runs in CI on every push (`.github/workflows/test.yml`).
 
 ## CoThink methodology
 
