@@ -1,7 +1,7 @@
 {
   "_comment": "CoThink driver config. Roles 1 (Strategist) and 8 (Executor) are played by the conductor (Claude) natively; this file configures the engines for roles 2-7.",
-
   "models": {
+    "claude": "",
     "codex": "",
     "gemini": "",
     "kimi": "",
@@ -9,32 +9,68 @@
     "vibe": "",
     "qwen": "qwen3-coder-plus"
   },
-
-  "_models_note": "Empty string = the CLI's own default model (recommended — stays current). NOTE: with Codex on a ChatGPT account (not an API key) the *-codex model ids (gpt-5-codex, etc.) are rejected, so leave codex empty and the CLI picks its current default (e.g. gpt-5.6-sol). vibe's model is set in its own config, not via a flag.",
-
+  "_models_note": "Empty string = the CLI's own default model (recommended \u2014 stays current). NOTE: with Codex on a ChatGPT account (not an API key) the *-codex model ids (gpt-5-codex, etc.) are rejected, so leave codex empty and the CLI picks its current default (e.g. gpt-5.6-sol). vibe's model is set in its own config, not via a flag. claude = the claude CLI (Claude Code) as an optional middle-role engine, always invoked FROM the conductor; empty = its default model.",
   "roles": {
-    "researcher": { "engine": "gemini", "mode": "read_only" },
-    "architect":  { "engine": "kimi",   "mode": "plan" },
-    "coder":      { "engine": "codex",  "mode": "write" },
-    "analyst":    { "engine": "qwen",   "mode": "read_only" },
-    "fixer":      { "engine": "codex",  "mode": "write" },
-    "tester":     { "engine": "kimi",   "mode": "write" }
+    "researcher": {
+      "engine": "gemini",
+      "mode": "read_only"
+    },
+    "architect": {
+      "engine": "kimi",
+      "mode": "plan"
+    },
+    "coder": {
+      "engine": "codex",
+      "mode": "write"
+    },
+    "analyst": {
+      "engine": "qwen",
+      "mode": "read_only"
+    },
+    "fixer": {
+      "engine": "codex",
+      "mode": "write"
+    },
+    "tester": {
+      "engine": "kimi",
+      "mode": "write"
+    }
   },
-
-  "_fallbacks_note": "Ordered fallback chain per engine — if the preferred engine for a role fails, the driver tries these in order. All six engines are available; assign any to any role above.",
-
+  "_fallbacks_note": "Ordered fallback chain per engine \u2014 if the preferred engine for a role fails, the driver tries these in order. All six engines are available; assign any to any role above.",
   "fallbacks": {
-    "codex": ["grok", "kimi", "qwen"],
-    "gemini": ["kimi", "grok", "qwen"],
-    "kimi": ["gemini", "grok", "qwen"],
-    "grok": ["codex", "kimi", "qwen"],
-    "vibe": ["kimi", "grok", "qwen"],
-    "qwen": ["codex", "gemini", "kimi"]
+    "codex": [
+      "grok",
+      "kimi",
+      "qwen"
+    ],
+    "gemini": [
+      "kimi",
+      "grok",
+      "qwen"
+    ],
+    "kimi": [
+      "gemini",
+      "grok",
+      "qwen"
+    ],
+    "grok": [
+      "codex",
+      "kimi",
+      "qwen"
+    ],
+    "vibe": [
+      "kimi",
+      "grok",
+      "qwen"
+    ],
+    "qwen": [
+      "codex",
+      "gemini",
+      "kimi"
+    ]
   },
-
   "max_iters": 3,
   "timeout_seconds": 1800,
-
   "durable_memory": {
     "_comment": "Optional: log run summaries/decisions to your OWN context-store REST API across runs. Off by default. Set base_url to your endpoint and export the bearer token in the env var named by token_env.",
     "enabled": false,

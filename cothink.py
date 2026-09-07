@@ -8,6 +8,9 @@ Tester loop). See SKILL.md for how the conductor drives this.
 Engines (validated headless commands, verified 2026-08):
   gemini : gemini --mode {accept-edits|plan} --output-format text [--add-dir WS] -p <prompt>
   kimi   : kimi --quiet -w <ws> {--yolo|--plan} -p <prompt>          (--quiet => clean final message)
+  claude : claude -p <prompt> --output-format text --no-session-persistence --strict-mcp-config
+           {write: --dangerously-skip-permissions | plan: --permission-mode plan | read_only: dontAsk + read tools}
+           (IS_SANDBOX=1; via claude-acct when installed) — optional middle-role engine
   codex  : codex-acct exec -C <ws>  (codex-acct = multi-account dispatcher; falls back to codex) --skip-git-repo-check -s {workspace-write|read-only}
            --output-last-message <file> <prompt>   (leave models.codex empty: ChatGPT-account auth
            rejects *-codex model ids, and the CLI's own default is current, e.g. gpt-5.6-sol)
@@ -121,6 +124,31 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
     role_dir.mkdir(parents=True, exist_ok=True)
     is_write = (mode == "write")
     ws = str(workspace) if workspace else str(role_dir)
+
+    if engine == "claude":
+        # Claude as a middle-role engine. CoThink is always driven FROM Claude Code, so
+        # Claude Code -> claude CLI is the allowed direction (never the reverse). Spread
+        # across the Claude fleet via claude-acct when installed; COTHINK_CLAUDE_BIN overrides.
+        # Isolation: no session written to the (shared) session store, no MCP servers, no
+        # user/project settings or hooks leaking in from the conductor's own setup.
+        # IS_SANDBOX=1 is the documented hatch that lets --dangerously-skip-permissions run as root.
+        claude_bin = os.environ.get("COTHINK_CLAUDE_BIN") or ("claude-acct" if shutil.which("claude-acct") else "claude")
+        cmd = ["env", "IS_SANDBOX=1", claude_bin, "-p", prompt, "--output-format", "text",
+               "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]
+        if is_write:
+            cmd += ["--dangerously-skip-permissions"]
+        elif mode == "plan":
+            cmd += ["--permission-mode", "plan", "--permission-prompts", "none"]
+        else:  # read_only: read tools + read-only shell; anything that would prompt is denied
+            cmd += ["--permission-mode", "dontAsk", "--permission-prompts", "none"]
+        if models.get("claude"):
+            cmd += ["--model", models["claude"]]  # pin FULL ids (claude-fable-5-1), not aliases
+        if workspace:
+            cmd += ["--add-dir", str(workspace)]
+        if not is_write and mode != "plan":
+            cmd += ["--tools", "Read,Glob,Grep,Bash"]  # variadic flag: keep it last
+        out, ok, err = _run(cmd, ws, timeout)
+        return out.strip(), ok, err
 
     if engine == "gemini":
         cmd = ["gemini", "--output-format", "text",
