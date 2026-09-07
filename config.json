@@ -71,6 +71,8 @@
   },
   "max_iters": 3,
   "timeout_seconds": 1800,
+  "vibe_max_price_usd": 1.0,
+  "_vibe_max_price_note": "Hard USD cap per vibe (Mistral) call via --max-price; vibe is the only pay-per-token engine with a spend cap. Set to 0/null to disable.",
   "durable_memory": {
     "_comment": "Optional: log run summaries/decisions to your OWN context-store REST API across runs. Off by default. Set base_url to your endpoint and export the bearer token in the env var named by token_env.",
     "enabled": false,

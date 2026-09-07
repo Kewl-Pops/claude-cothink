@@ -219,10 +219,13 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return out.strip(), ok, err
 
     if engine == "vibe":
+        # vibe has no --model flag (its model lives in ~/.vibe/config.toml); models.vibe is ignored.
+        # It is the only pay-per-token engine with a hard spend cap, so apply one per call.
         cmd = ["vibe", "-p", prompt, "--output", "text", "--workdir", ws,
                *(["--auto-approve"] if is_write else ["--agent", "plan"])]
-        if models.get("vibe"):
-            cmd += ["--model", models["vibe"]]
+        max_price = cfg.get("vibe_max_price_usd")
+        if max_price:
+            cmd += ["--max-price", str(max_price)]
         out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
