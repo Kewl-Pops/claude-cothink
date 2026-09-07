@@ -148,6 +148,8 @@ python3 ~/.claude/skills/cothink/cothink.py init --title "csv-deduper"
 python3 ~/.claude/skills/cothink/cothink.py run --run-dir <run_dir> [--workspace <path>]
 ```
 
+- `python3 ~/.claude/skills/cothink/cothink.py runs [--last N] [--status passed|max_iters_reached|blocked] [--json]` — list past runs (newest first) with status, iterations, engines, guard events and blocked items.
+
 The brief is the contract every engine is handed: besides Objective, Constraints and Success criteria
 it carries **Out of scope** (what no role may touch or fail on, including pre-existing failures) and
 **Prerequisites** (what the run depends on and you already verified). Criteria must be checkable

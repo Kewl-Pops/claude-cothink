@@ -626,6 +626,58 @@ def doctor_report(cfg, which=shutil.which, run=subprocess.run, env=os.environ):
     }
 
 
+RUN_ROLES = (("r", "researcher"), ("a", "architect"), ("c", "coder"),
+             ("an", "analyst"), ("f", "fixer"), ("t", "tester"))
+RUNS_HEADER = "RUN ID  STATUS  ITERS  ENGINES  GUARD  BLOCKED"
+
+
+def list_runs(root, last=20, status=None):
+    """Return run rows newest-first, with result=None for missing result files."""
+    if not root.is_dir():
+        return []
+    dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True)
+    rows = []
+    for p in dirs:
+        rp = p / "result.json"
+        if not rp.is_file():
+            result = None
+        else:
+            try:
+                result = json.loads(rp.read_text())
+                if not isinstance(result, dict):
+                    raise ValueError("not a JSON object")
+            except (ValueError, OSError) as e:
+                log_stderr(f"runs: skipping {p.name}: result.json is not valid JSON ({e})")
+                continue
+        if status is not None and (result is None or result.get("status") != status):
+            continue
+        rows.append({"run_id": p.name, "result": result})
+    return rows[:last] if last is not None and last >= 0 else rows
+
+
+def format_run_row(row):
+    """Return a table line with cells separated by two spaces, without padding."""
+    result = row["result"]
+    data = result if result is not None else {}
+    engines_used = data.get("engines_used") or {}
+    engines = " ".join(f"{k}={engines_used.get(role) or '-'}" for k, role in RUN_ROLES)
+    return "  ".join((row["run_id"], str(data.get("status", "-")),
+                      str(data.get("iterations", "-")), engines,
+                      str(len(data.get("guard_events") or [])) if result is not None else "-",
+                      str(len(data.get("blocked") or [])) if result is not None else "-"))
+
+
+def cmd_runs(args):
+    """List past runs from RUNS_ROOT."""
+    rows = list_runs(RUNS_ROOT, args.last, args.status)
+    if getattr(args, "json", False):
+        print(json.dumps([row["result"] for row in rows if row["result"] is not None], indent=2))
+        return
+    print(RUNS_HEADER)
+    for row in rows:
+        print(format_run_row(row))
+
+
 def cmd_doctor(args):
     rep = doctor_report(load_config())
     if getattr(args, "json", False):
@@ -882,6 +934,13 @@ def main():
     pd = sub.add_parser("doctor", help="preflight: engine CLIs on PATH, model pins, role map, config invariants")
     pd.add_argument("--json", action="store_true", help="machine-readable report")
     pd.set_defaults(func=cmd_doctor)
+
+    prs = sub.add_parser("runs", help="list past runs from $COTHINK_HOME/runs (newest first)")
+    prs.add_argument("--last", type=int, default=20, help="show at most N runs (default 20)")
+    prs.add_argument("--status", choices=["passed", "max_iters_reached", "blocked"],
+                     help="only runs with this status (runs without result.json are excluded)")
+    prs.add_argument("--json", action="store_true", help="JSON array of result.json objects, newest first")
+    prs.set_defaults(func=cmd_runs)
 
     args = ap.parse_args()
     args.func(args)
