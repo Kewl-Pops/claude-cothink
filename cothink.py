@@ -146,7 +146,10 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         if workspace:
             cmd += ["--add-dir", str(workspace)]
         if not is_write and mode != "plan":
-            cmd += ["--tools", "Read,Glob,Grep,Bash"]  # variadic flag: keep it last
+            # read tools + shell; dontAsk denies anything that would prompt, so explicitly allow the
+            # test runner (an Analyst that cannot run the suite can only guess). Variadic flags: last.
+            cmd += ["--tools", "Read,Glob,Grep,Bash",
+                    "--allowedTools", "Bash(pytest *)", "Bash(python3 -m pytest *)"]
         out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
@@ -197,6 +200,9 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         codex_bin = os.environ.get("COTHINK_CODEX_BIN") or ("codex-acct" if shutil.which("codex-acct") else "codex")
         cmd = [codex_bin, "exec", "-C", ws, "--skip-git-repo-check",
                "-s", ("workspace-write" if is_write else "read-only")]
+        effort = cfg.get("codex_reasoning_effort")
+        if effort:  # per-call override; the accounts' own config.toml is untouched
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
         if models.get("codex"):
             cmd += ["-m", models["codex"]]
         cmd += ["--output-last-message", str(out_file), prompt]
@@ -251,27 +257,68 @@ def _looks_failed(out, ok):
     return any(m in out for m in HARD_ERRORS)
 
 
-def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir):
-    """Run a role on its configured engine, falling back if it fails."""
-    pref = cfg["roles"][role]["engine"]
-    fb = cfg.get("fallbacks", {}).get(pref, [])
+def _family(cfg, engine):
+    """Model family of an engine (config.families), used for the independence guard."""
+    return (cfg.get("families") or {}).get(engine, engine)
+
+
+def role_chain(cfg, role):
+    """Ordered engine list for a role: its primary, then its own fallback chain
+    (roles.<role>.fallbacks). Legacy per-engine tables (fallbacks.<engine>) still work
+    for configs that predate per-role chains."""
+    rc = cfg["roles"][role]
+    pref = rc["engine"]
+    fb = rc.get("fallbacks")
+    if fb is None:
+        fb = cfg.get("fallbacks", {}).get(pref, [])
     if isinstance(fb, str):  # accept a single engine or an ordered chain
         fb = [fb]
     order = [pref]
     for e in fb:
         if e and e not in order:
             order.append(e)
+    return order
+
+
+def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
+             exclude_families=(), events=None):
+    """Run a role on its configured engine, falling back down its chain if it fails.
+
+    mode comes from roles.<role>.mode when set (the caller's value is the default).
+    exclude_families: model families that must not play this role in this run — the
+    Analyst must never share a family with whatever actually wrote the code. Excluded
+    engines are skipped and logged; if nothing independent is left the run proceeds on an
+    excluded engine with a loud warning (recorded in `events`) rather than dying.
+    Returns (output, engine_that_ran) — engine is "none" if every engine failed.
+    """
+    rc = cfg["roles"][role]
+    pref = rc["engine"]
+    mode = rc.get("mode") or mode
+    order = role_chain(cfg, role)
+    excluded = [e for e in order if exclude_families and _family(cfg, e) in exclude_families]
+    independent = [e for e in order if e not in excluded]
+    for e in excluded:
+        log(run_dir, f"{role}: skipping {e} — same model family ({_family(cfg, e)}) as the code writer")
     last_err = ""
-    for eng in order:
-        log(run_dir, f"{role}: {eng} (mode={mode}) ...")
-        out, ok, err = run_engine(eng, prompt, role_dir, workspace, mode, cfg, timeout)
-        if not _looks_failed(out, ok):
-            if eng != pref:
-                out = f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n" + out
-            log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
-            return out, eng
-        last_err = (err or out or "")[:300]
-        log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
+    for tier, engines in (("independent", independent), ("violation", excluded)):
+        for eng in engines:
+            if tier == "violation":
+                log(run_dir, f"{role}: WARNING no independent engine left; running {eng} despite family overlap")
+                if events is not None:
+                    events.append({"role": role, "engine": eng, "event": "family_guard_violation"})
+            log(run_dir, f"{role}: {eng} (mode={mode}) ...")
+            out, ok, err = run_engine(eng, prompt, role_dir, workspace, mode, cfg, timeout)
+            if not _looks_failed(out, ok):
+                banner = ""
+                if eng != pref:
+                    banner += f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n"
+                if tier == "violation":
+                    banner += (f"_[CoThink WARNING: {role} ran on {eng}, the same model family as the "
+                               f"code writer — this verdict is not independent]_\n\n")
+                log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
+                return banner + out, eng
+            last_err = (err or out or "")[:300]
+            log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
     return (f"[CoThink] {role} failed on all engines ({', '.join(order)}). "
             f"Last error: {last_err}"), "none"
 
@@ -329,6 +376,11 @@ def cmd_run(args):
     timeout = int(cfg.get("timeout_seconds", 1800))
     max_iters = int(cfg.get("max_iters", 3))
     engines_used = {}
+    events = []  # independence-guard events, surfaced in result.json
+
+    def writer_families():
+        return {_family(cfg, e) for e in (engines_used.get("coder"), engines_used.get("fixer"))
+                if e and e != "none"}
 
     log(run_dir, f"=== CoThink run start: {run_dir.name} (workspace={workspace}) ===")
 
@@ -336,7 +388,7 @@ def cmd_run(args):
     research, engines_used["researcher"] = run_role(
         "researcher",
         render("researcher.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=""),
-        run_dir / "02", None, "read_only", cfg, timeout, run_dir)
+        run_dir / "02", workspace, "read_only", cfg, timeout, run_dir)
     (run_dir / "02-researcher.md").write_text(research)
 
     # Role 3 — Architect
@@ -344,7 +396,7 @@ def cmd_run(args):
         "architect",
         render("architect.md", BRIEF=brief, WORKSPACE=workspace,
                PRIOR=section("Research / Fact Base", research)),
-        run_dir / "03", None, "plan", cfg, timeout, run_dir)
+        run_dir / "03", workspace, "read_only", cfg, timeout, run_dir)
     (run_dir / "03-architect.md").write_text(arch)
 
     # Role 4 — Coder
@@ -371,7 +423,8 @@ def cmd_run(args):
                    + (section("Previous Tester findings", prev_tester) if prev_tester else ""))
         analyst, engines_used["analyst"] = run_role(
             "analyst", render("analyst.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=a_prior),
-            itdir / "05", workspace, "read_only", cfg, timeout, run_dir)
+            itdir / "05", workspace, "read_only", cfg, timeout, run_dir,
+            exclude_families=writer_families(), events=events)
         (itdir / "05-analyst.md").write_text(analyst)
         analyst_pass = verdict(analyst, "VERDICT") == "PASS"
 
@@ -392,6 +445,12 @@ def cmd_run(args):
             itdir / "07", workspace, "write", cfg, timeout, run_dir)
         (itdir / "07-tester.md").write_text(tester)
         tester_pass = verdict(tester, "RESULT") == "PASS"
+        if (engines_used["tester"] != "none" and engines_used["analyst"] != "none"
+                and _family(cfg, engines_used["tester"]) == _family(cfg, engines_used["analyst"])):
+            log(run_dir, f"iter {it}: NOTE Analyst ({engines_used['analyst']}) and Tester "
+                         f"({engines_used['tester']}) share a model family — the two verdicts are correlated")
+            events.append({"role": "tester", "engine": engines_used["tester"],
+                           "event": "analyst_tester_same_family", "iter": it})
 
         prev_tester, prev_tester_pass = tester, tester_pass
         history.append({"iter": it, "analyst_pass": analyst_pass,
@@ -410,6 +469,7 @@ def cmd_run(args):
         "max_iters": max_iters,
         "history": history,
         "engines_used": engines_used,
+        "guard_events": events,
         "workspace": str(workspace),
         "run_dir": str(run_dir),
         "artifacts": {

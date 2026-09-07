@@ -1,74 +1,82 @@
 {
-  "_comment": "CoThink driver config. Roles 1 (Strategist) and 8 (Executor) are played by the conductor (Claude) natively; this file configures the engines for roles 2-7.",
+  "_comment": "CoThink driver config. Roles 1 (Strategist) and 8 (Executor) are played by the conductor (Claude Code) natively; this file configures the engines for roles 2-7. Claude Code is the only entry point: it invokes the other CLIs, never the reverse.",
   "models": {
-    "claude": "",
+    "claude": "claude-fable-5-1",
     "codex": "",
-    "gemini": "",
+    "gemini": "gemini-3.6-flash-medium",
     "kimi": "",
     "grok": "",
     "vibe": "",
     "qwen": "qwen3-coder-plus"
   },
-  "_models_note": "Empty string = the CLI's own default model (recommended \u2014 stays current). NOTE: with Codex on a ChatGPT account (not an API key) the *-codex model ids (gpt-5-codex, etc.) are rejected, so leave codex empty and the CLI picks its current default (e.g. gpt-5.6-sol). vibe's model is set in its own config, not via a flag. claude = the claude CLI (Claude Code) as an optional middle-role engine, always invoked FROM the conductor; empty = its default model.",
+  "_models_note": "Empty string = the CLI's own default model (stays current). claude: pin a FULL id \u2014 unpinned calls land on whichever model each fleet account defaults to, and aliases resolve inconsistently. gemini: the Flash pin is a quota decision (the Antigravity weekly pool is small; one Pro-high Researcher run can lock the account out for days); use gemini-3.1-pro-high if quota is not a concern. codex: with a ChatGPT account the *-codex ids are rejected, so leave it empty. vibe: no --model flag; its model lives in ~/.vibe/config.toml.",
+  "families": {
+    "claude": "anthropic",
+    "codex": "openai",
+    "gemini": "google",
+    "kimi": "moonshot",
+    "grok": "xai",
+    "vibe": "mistral",
+    "qwen": "alibaba"
+  },
+  "_families_note": "Model family per engine. The driver never lets the Analyst run on the family that actually wrote the code in this run (Coder or Fixer, including after fallbacks); it skips such engines and logs it.",
   "roles": {
     "researcher": {
       "engine": "gemini",
-      "mode": "read_only"
+      "mode": "read_only",
+      "fallbacks": [
+        "grok",
+        "kimi"
+      ]
     },
     "architect": {
-      "engine": "kimi",
-      "mode": "plan"
+      "engine": "claude",
+      "mode": "read_only",
+      "fallbacks": [
+        "kimi",
+        "codex",
+        "grok"
+      ]
     },
     "coder": {
       "engine": "codex",
-      "mode": "write"
+      "mode": "write",
+      "fallbacks": [
+        "kimi",
+        "grok",
+        "qwen"
+      ]
     },
     "analyst": {
-      "engine": "qwen",
-      "mode": "read_only"
+      "engine": "grok",
+      "mode": "read_only",
+      "fallbacks": [
+        "claude",
+        "gemini",
+        "kimi"
+      ]
     },
     "fixer": {
       "engine": "codex",
-      "mode": "write"
+      "mode": "write",
+      "fallbacks": [
+        "kimi",
+        "grok",
+        "qwen"
+      ]
     },
     "tester": {
       "engine": "kimi",
-      "mode": "write"
+      "mode": "write",
+      "fallbacks": [
+        "grok",
+        "claude"
+      ]
     }
   },
-  "_fallbacks_note": "Ordered fallback chain per engine \u2014 if the preferred engine for a role fails, the driver tries these in order. All six engines are available; assign any to any role above.",
-  "fallbacks": {
-    "codex": [
-      "grok",
-      "kimi",
-      "qwen"
-    ],
-    "gemini": [
-      "kimi",
-      "grok",
-      "qwen"
-    ],
-    "kimi": [
-      "gemini",
-      "grok",
-      "qwen"
-    ],
-    "grok": [
-      "codex",
-      "kimi",
-      "qwen"
-    ],
-    "vibe": [
-      "kimi",
-      "grok",
-      "qwen"
-    ],
-    "qwen": [
-      "codex",
-      "gemini",
-      "kimi"
-    ]
-  },
+  "_roles_note": "engine = primary; fallbacks = ordered per-role chain tried when the primary fails (quota, crash, empty output); mode = read_only | plan | write. Builder/validator/tester are three different families (OpenAI / xAI / Moonshot) so no vendor both writes and judges the code; codex never appears in the Analyst or Tester chains. claude is used where one read-only call has the most leverage (Architect) and as the Analyst's first fallback \u2014 never in the write loop, which burns its quota fastest. vibe (Mistral, pay-per-token, 33% headless timeout rate observed) and qwen (pay-per-token, single-shot validator that fabricated evidence) are wired engines but kept out of the judgment seats.",
+  "codex_reasoning_effort": "high",
+  "_codex_reasoning_effort_note": "Passed per call as `-c model_reasoning_effort=...` so cothink's Codex spend does not inherit an xhigh account default; the accounts' own config.toml is untouched. Empty = inherit.",
   "max_iters": 3,
   "timeout_seconds": 1800,
   "vibe_max_price_usd": 1.0,
