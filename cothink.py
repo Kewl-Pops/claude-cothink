@@ -151,8 +151,12 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return out.strip(), ok, err
 
     if engine == "gemini":
-        cmd = ["gemini", "--output-format", "text",
+        # Antigravity CLI (agy) flags. --print-timeout defaults to 5m, far below a role's budget;
+        # in write mode shell/test commands are soft-denied unless permissions are skipped.
+        cmd = ["gemini", "--output-format", "text", "--print-timeout", f"{int(timeout)}s",
                "--mode", "accept-edits" if is_write else "plan"]
+        if is_write:
+            cmd += ["--dangerously-skip-permissions"]
         if models.get("gemini"):
             cmd += ["--model", models["gemini"]]
         if workspace:
@@ -162,12 +166,27 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return strip_gemini(out), ok, err
 
     if engine == "kimi":
+        # In --plan mode kimi writes the full blueprint to ~/.kimi/plans/<name>.md and prints only a
+        # short summary, so harvest any plan file created during this call and prefer it when longer.
+        # (Caveat: --plan is porous in print mode — ExitPlanMode is auto-approved — so a plan/read_only
+        # kimi role can still write into its cwd; keep read-only roles on engines with real deny rules.)
+        plans_dir = Path.home() / ".kimi" / "plans"
+        before = {p: p.stat().st_mtime for p in plans_dir.glob("*.md")} if plans_dir.is_dir() else {}
+        t_start = time.time()
         cmd = ["kimi", "--quiet", "-w", ws, ("--yolo" if is_write else "--plan")]
         if models.get("kimi"):
             cmd += ["-m", models["kimi"]]
         cmd += ["-p", prompt]
         out, ok, err = _run(cmd, ws, timeout)
-        return out.strip(), ok, err
+        out = out.strip()
+        if not is_write and plans_dir.is_dir():
+            new_plans = [p for p in plans_dir.glob("*.md")
+                         if p.stat().st_mtime >= t_start - 1 and p.stat().st_mtime > before.get(p, 0)]
+            if new_plans:
+                plan_text = max(new_plans, key=lambda p: p.stat().st_mtime).read_text().strip()
+                if len(plan_text) > len(out):
+                    out = plan_text + ("\n\n---\n" + out if out else "")
+        return out, ok, err
 
     if engine == "codex":
         out_file = role_dir / "_codex_last.txt"
@@ -185,10 +204,15 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return out.strip(), ok, err
 
     if engine == "grok":
+        # Headless grok has nobody to answer permission prompts: in the default "ask" mode (and in
+        # dontAsk / plan modes) the turn is CANCELLED silently on the first gated tool call and only a
+        # preamble comes back. So every mode auto-approves, and read_only/plan add deny rules: verified
+        # that Write/Edit tools AND shell redirects (`echo x > f`) are refused ("deny rule on edit")
+        # while shell reads (wc, find, cat) still run.
         cmd = ["grok", "-p", prompt, "--output-format", "plain",
-               "--no-alt-screen", "--cwd", ws]
-        if is_write:
-            cmd += ["--always-approve"]
+               "--no-alt-screen", "--cwd", ws, "--no-memory", "--always-approve"]
+        if not is_write:
+            cmd += ["--deny", "Write", "--deny", "Edit"]
         if models.get("grok"):
             cmd += ["-m", models["grok"]]
         out, ok, err = _run(cmd, ws, timeout)
