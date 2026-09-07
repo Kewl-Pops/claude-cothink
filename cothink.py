@@ -8,7 +8,7 @@ Tester loop). See SKILL.md for how the conductor drives this.
 Engines (validated headless commands, verified 2026-08):
   gemini : gemini --mode {accept-edits|plan} --output-format text [--add-dir WS] -p <prompt>
   kimi   : kimi --quiet -w <ws> {--yolo|--plan} -p <prompt>          (--quiet => clean final message)
-  codex  : codex exec -C <ws> --skip-git-repo-check -s {workspace-write|read-only}
+  codex  : codex-acct exec -C <ws>  (codex-acct = multi-account dispatcher; falls back to codex) --skip-git-repo-check -s {workspace-write|read-only}
            --output-last-message <file> <prompt>   (leave models.codex empty: ChatGPT-account auth
            rejects *-codex model ids, and the CLI's own default is current, e.g. gpt-5.6-sol)
   grok   : grok -p <prompt> --output-format plain --no-alt-screen --cwd <ws> [--always-approve]
@@ -19,6 +19,7 @@ Subcommands:
   run    --run-dir DIR [--workspace WS] -> run roles 2-7; writes artifacts + result.json
 """
 import argparse
+import shutil
 import datetime
 import json
 import os
@@ -144,7 +145,10 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         out_file = role_dir / "_codex_last.txt"
         if out_file.exists():
             out_file.unlink()
-        cmd = ["codex", "exec", "-C", ws, "--skip-git-repo-check",
+        # Route through the codex-acct dispatcher when installed (spreads load across the
+        # ChatGPT accounts); COTHINK_CODEX_BIN overrides; plain `codex` otherwise.
+        codex_bin = os.environ.get("COTHINK_CODEX_BIN") or ("codex-acct" if shutil.which("codex-acct") else "codex")
+        cmd = [codex_bin, "exec", "-C", ws, "--skip-git-repo-check",
                "-s", ("workspace-write" if is_write else "read-only")]
         if models.get("codex"):
             cmd += ["-m", models["codex"]]
