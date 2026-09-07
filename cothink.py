@@ -17,9 +17,13 @@ Engines (validated headless commands, verified 2026-08):
   grok   : grok -p <prompt> --output-format plain --no-alt-screen --cwd <ws> [--always-approve]
   vibe   : vibe -p <prompt> --output text --workdir <ws> {--auto-approve|--agent plan}
 
+Run statuses: passed | max_iters_reached | blocked (halted before the Coder on an Architect
+`## Decisions` line that begins with BLOCKED:, or the loop stalled with every remaining failure
+environment-blocked and the Fixer agreeing under `## Not fixed`).
+
 Subcommands:
   init   --title "..."                  -> create a run dir, print JSON {run_id, run_dir, ...}
-  run    --run-dir DIR [--workspace WS] -> run roles 2-7; writes artifacts + result.json
+  run    --run-dir DIR [--workspace WS] [--no-halt-on-blocked] -> run roles 2-7; writes artifacts + result.json
 """
 import argparse
 import shutil
@@ -85,6 +89,117 @@ def section(title, body):
     if not body:
         return ""
     return f"\n\n### {title}\n{body.strip()}\n"
+
+
+def lint_brief(brief, run_dir):
+    """Warn-only: brief.md is the contract every engine is handed verbatim."""
+    found = {}
+    for sec in ("Objective", "Success criteria", "Out of scope"):
+        found[sec] = bool(re.search(rf"^##\s*{re.escape(sec)}\b", brief or "", re.M | re.I))
+        if not found[sec]:
+            log(run_dir, f"brief: WARNING missing section '## {sec}'")
+    n = len(re.findall(r"^\s*\d+[.)]", section_text(brief, "Success criteria"), re.M))
+    if n == 0:
+        log(run_dir, "brief: WARNING no numbered success criteria found")
+    return {"sections": found, "criteria_count": n}
+
+
+def analyst_shape(out):
+    """A usable Analyst report has a `## Criteria check` section (the one the driver parses)
+    AND a verdict line. Level-3 headings are tolerated (kimi/gemini nest under a title)."""
+    return bool(re.search(r"^#{2,3}\s*Criteria check\b", out or "", re.I | re.M)
+                and re.search(r"VERDICT\s*[:=]\s*(PASS|FAIL)", out or "", re.I))
+
+
+def tester_shape(out):
+    return bool(re.search(r"RESULT\s*[:=]\s*(PASS|FAIL)", out or "", re.I))
+
+
+# `BLOCKED: <reason>` as the first token of a line, after optional list decoration and a D<n>/T<n>
+# id. One-shot engines bold/backtick markers and number lists, so all of that is tolerated; prose
+# ("the Researcher wrote BLOCKED: ...") and topic-first lines ("- Prod schema: BLOCKED: ...") are not.
+_MD = r"(?:\*\*|`)?"
+BLOCKED_RE = re.compile(
+    r"^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]*)?"            # bullet or numbered-list marker
+    + rf"(?:{_MD}[DT]\d+{_MD}[ \t]*[:—–-]?[ \t]*)?"    # D<n>/T<n> id, optional `:` or dash
+    + rf"{_MD}BLOCKED{_MD}:{_MD}\s*(.+?)\s*$", re.M | re.I)
+# "BLOCKED: none", "(none)", "n/a — all resolved" are placeholders, not items
+BLOCKED_NONE_RE = re.compile(r"^[(\[`]?\s*(?:none|n/?a|nothing)\s*(?:$|[)\]`.,;:(\[—–-])", re.I)
+
+
+def blocked_items(text):
+    """`BLOCKED: <reason>` lines — things no role in this run can do from inside the workspace."""
+    seen, out = set(), []
+    for b in BLOCKED_RE.findall(text or ""):
+        if BLOCKED_NONE_RE.match(b.strip()):
+            continue
+        if b.lower() not in seen:
+            seen.add(b.lower()); out.append(b)
+    return out
+
+
+def blocked_union(seed, *texts):
+    """`seed` items first, then every BLOCKED: line from `texts`, deduped case-insensitively."""
+    seen, out = set(), []
+    for b in list(seed) + [b for tx in texts for b in blocked_items(tx)]:
+        if b.lower() not in seen:
+            seen.add(b.lower()); out.append(b)
+    return out
+
+
+def section_text(text, heading):
+    """Body of the `## <heading>` (or `### <heading>`) section, up to the next heading of the same
+    or higher level (level-1 `# ` lines are ignored: they occur inside code fences), or ""."""
+    m = re.search(rf"^(#{{2,3}})\s*{re.escape(heading)}\b[^\n]*\n", text or "", re.M | re.I)
+    if not m:
+        return ""
+    lvl = len(m.group(1))
+    body = text[m.end():]
+    e = re.search(rf"^#{{2,{lvl}}}\s", body, re.M)
+    return body[:e.start()] if e else body
+
+
+# A criteria-check line is classified by its LEADING mark (after list decoration / bold):
+# MET, NOT MET, NOT VERIFIED (and common off-vocabulary spellings), BLOCKED.
+MARK_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])?\s*(?:\*\*|`)?"
+                     r"(MET|NOT MET|NOT VERIFIED|NOT VERIFIABLE|PARTIALLY MET|PARTLY MET|UNMET|UNVERIFIED|BLOCKED)\b", re.I)
+OPEN_RE = re.compile(r"\b(?:NOT|PARTIALLY|PARTLY)\s+(?:MET|VERIFIED|VERIFIABLE)\b|\bUN(?:MET|VERIFIED)\b", re.I)
+
+
+def criteria_marks(analyst_text):
+    """Inside the Analyst's `## Criteria check`: the BLOCKED criterion lines, and the count of
+    criteria that are still open (NOT MET / NOT VERIFIED / partial) without being BLOCKED — any
+    open one keeps the loop going. Indented continuation lines are ignored; an unmarked criterion
+    line that mentions an open status is counted as open (conservative: better one more
+    iteration than a false `blocked`)."""
+    not_met, blocked = 0, []
+    for ln in section_text(analyst_text, "Criteria check").splitlines():
+        if not ln.strip() or re.match(r"\s*VERDICT\b", ln, re.I):
+            continue
+        m = MARK_RE.match(ln)
+        if m:
+            k = m.group(1).upper()
+            if k == "BLOCKED":
+                blocked.append(ln.strip())
+            elif k != "MET":
+                not_met += 1
+        elif not ln[:1].isspace() and OPEN_RE.search(ln):
+            not_met += 1
+    return {"not_met": not_met, "blocked": blocked}
+
+
+CLAUDE_LIMIT_RE = re.compile(r"out of usage credits|usage limit|rate.?limit|hit your (session|usage|5.?hour|weekly) limit"
+                             r"|too many requests|\b429\b|limit reached", re.I)
+
+
+def log_stderr(msg):
+    print(f"[cothink] {msg}", file=sys.stderr)
+
+
+def normalize_headings(text):
+    """grok's plain output glues streamed narration onto the report's first heading
+    ("...then report.## Prior findings"); give every `## `/`### ` heading its own line."""
+    return re.sub(r"(?<=[^\n])(?=#{2,3} [A-Z])", "\n", (text or "").strip())
 
 
 def strip_gemini(text):
@@ -153,6 +268,11 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
             cmd += ["--tools", "Read,Glob,Grep,Bash",
                     "--allowedTools", "Bash(pytest *)", "Bash(python3 -m pytest *)"]
         out, ok, err = _run(cmd, ws, timeout)
+        if not ok and CLAUDE_LIMIT_RE.search((out or "") + (err or "")):
+            # the account the dispatcher picked has no credits/quota for this model (a pinned Fable id
+            # on a team seat, a spent 5h window): the dispatcher cools it down, so one retry lands elsewhere
+            log_stderr(f"claude: limit/credits signature from the picked account — retrying once via {claude_bin}")
+            out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
     if engine == "gemini":
@@ -230,7 +350,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         if models.get("grok"):
             cmd += ["-m", models["grok"]]
         out, ok, err = _run(cmd, ws, timeout)
-        return out.strip(), ok, err
+        return normalize_headings(out), ok, err
 
     if engine == "vibe":
         # vibe has no --model flag (its model lives in ~/.vibe/config.toml); models.vibe is ignored.
@@ -289,7 +409,7 @@ def role_chain(cfg, role):
 
 
 def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
-             exclude_families=(), events=None):
+             exclude_families=(), events=None, accept=None):
     """Run a role on its configured engine, falling back down its chain if it fails.
 
     mode comes from roles.<role>.mode when set (the caller's value is the default).
@@ -297,6 +417,8 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
     Analyst must never share a family with whatever actually wrote the code. Excluded
     engines are skipped and logged; if nothing independent is left the run proceeds on an
     excluded engine with a loud warning (recorded in `events`) rather than dying.
+    accept: optional shape check on the output; a report that fails it (e.g. a kimi plan-mode
+    summary with no VERDICT line) is treated as an engine failure and falls through the chain.
     Returns (output, engine_that_ran) — engine is "none" if every engine failed.
     """
     rc = cfg["roles"][role]
@@ -308,6 +430,7 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
     for e in excluded:
         log(run_dir, f"{role}: skipping {e} — same model family ({_family(cfg, e)}) as the code writer")
     last_err = ""
+    malformed = None  # first shape-failed report (highest-preference engine), kept as a last resort
     for tier, engines in (("independent", independent), ("violation", excluded)):
         for eng in engines:
             if tier == "violation":
@@ -316,17 +439,31 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
                     events.append({"role": role, "engine": eng, "event": "family_guard_violation"})
             log(run_dir, f"{role}: {eng} (mode={mode}) ...")
             out, ok, err = run_engine(eng, prompt, role_dir, workspace, mode, cfg, timeout)
-            if not _looks_failed(out, ok):
-                banner = ""
-                if eng != pref:
-                    banner += f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n"
-                if tier == "violation":
-                    banner += (f"_[CoThink WARNING: {role} ran on {eng}, the same model family as the "
-                               f"code writer — this verdict is not independent]_\n\n")
+            banner = ""
+            if eng != pref:
+                banner += f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n"
+            if tier == "violation":
+                banner += (f"_[CoThink WARNING: {role} ran on {eng}, the same model family as the "
+                           f"code writer — this verdict is not independent]_\n\n")
+            failed = _looks_failed(out, ok)
+            if not failed and accept is not None and not accept(out):
+                failed, err = True, "malformed report: missing required section or verdict line"
+                if events is not None:
+                    events.append({"role": role, "engine": eng, "event": "malformed_report"})
+                if malformed is None:
+                    malformed = (banner + out, eng)
+            if not failed:
                 log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
                 return banner + out, eng
-            last_err = (err or out or "")[:300]
+            # keep both streams: dispatchers print only a routing line on stderr while the CLI's
+            # real error (e.g. "out of usage credits") lands on stdout
+            last_err = " | ".join(x.strip() for x in (err, out) if x and x.strip())[:300]
             log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
+    if malformed is not None:  # a real report with the wrong headings beats a failure banner
+        out, eng = malformed
+        log(run_dir, f"{role}: all engines failed; keeping {eng}'s malformed report as a last resort")
+        return (f"_[CoThink WARNING: {role} report from {eng} failed the shape check "
+                f"(missing required section or verdict line); kept as a last resort]_\n\n" + out), eng
     return (f"[CoThink] {role} failed on all engines ({', '.join(order)}). "
             f"Last error: {last_err}"), "none"
 
@@ -408,6 +545,36 @@ def cmd_run(args):
                 if e and e != "none"}
 
     log(run_dir, f"=== CoThink run start: {run_dir.name} (workspace={workspace}) ===")
+    brief_lint = lint_brief(brief, run_dir)
+    blocked = []
+
+    def finish(status, it, hist, converged=False):
+        result = {
+            "run_id": run_dir.name,
+            "status": status,
+            "converged": converged,
+            "iterations": it,
+            "max_iters": max_iters,
+            "history": hist,
+            "engines_used": engines_used,
+            "guard_events": events,
+            "blocked": blocked,
+            "brief_lint": brief_lint,
+            "workspace": str(workspace),
+            "run_dir": str(run_dir),
+            "artifacts": {
+                "brief": str(run_dir / "brief.md"),
+                "researcher": str(run_dir / "02-researcher.md"),
+                "architect": str(run_dir / "03-architect.md"),
+                "coder": str(run_dir / "04-coder.md"),
+                "final_iter": str(run_dir / f"iter-{it}") if it else None,
+            },
+        }
+        (run_dir / "result.json").write_text(json.dumps(result, indent=2))
+        maybe_log_durable(cfg, run_dir, result, brief)
+        log(run_dir, f"=== CoThink run done: {result['status']} after {it} iter(s) ===")
+        print(json.dumps(result, indent=2))
+        return result
 
     # Role 2 — Researcher
     research, engines_used["researcher"] = run_role(
@@ -424,6 +591,24 @@ def cmd_run(args):
         run_dir / "03", workspace, "read_only", cfg, timeout, run_dir)
     (run_dir / "03-architect.md").write_text(arch)
 
+    # Halt before the Coder on anything the Architect could not design around: every BLOCKED
+    # criterion in the logs (prod schema, read-only git, no Postgres) burned all 3 iterations.
+    # Only the `## Decisions` section counts — a Researcher line quoted elsewhere does not.
+    arch_blocked = blocked_items(section_text(arch, "Decisions"))
+    blocked = list(arch_blocked)
+    for b in arch_blocked:
+        log(run_dir, f"architect: BLOCKED {b}")
+
+    def all_blocked(analyst_marks, fixer_text, tester_text):
+        """Architect BLOCKED decisions, then the Analyst's BLOCKED criteria lines, then the Fixer's
+        `## Not fixed` and the Tester's `BLOCKED:` reasons — one case-insensitive dedupe."""
+        return blocked_union(arch_blocked + list(analyst_marks),
+                             section_text(fixer_text, "Not fixed"), tester_text)
+
+    if arch_blocked and not getattr(args, "no_halt_on_blocked", False):
+        log(run_dir, f"halting before the Coder: {len(arch_blocked)} BLOCKED item(s) need the operator")
+        return finish("blocked", 0, [])
+
     # Role 4 — Coder
     coder, engines_used["coder"] = run_role(
         "coder",
@@ -435,7 +620,10 @@ def cmd_run(args):
     # Roles 5-7 — Analyst -> Fixer -> Tester loop
     history = []
     prev_tester, prev_tester_pass = None, False
+    prev_analyst, prev_fixer = None, None
+    analyst = fixer = tester = None  # stay bound when max_iters <= 0 skips the loop
     analyst_pass = tester_pass = False
+    stalled = False
     it = 0
     while it < max_iters:
         it += 1
@@ -444,30 +632,40 @@ def cmd_run(args):
         log(run_dir, f"--- iteration {it}/{max_iters} ---")
 
         # Analyst (read-only)
-        a_prior = (section("Architecture", arch) + section("Coder report", coder)
+        # Fixed point: the previous Analyst report + the Fixer changelog since it, so findings
+        # keep their IDs and converge instead of being re-discovered from scratch every iteration.
+        coder_title = ("Coder report (iteration 0 — superseded by the Fixer changelog below)"
+                       if prev_fixer else "Coder report")
+        a_prior = (section("Architecture", arch) + section(coder_title, coder)
+                   + (section("Previous Analyst findings", prev_analyst) if prev_analyst else "")
+                   + (section("Latest Fixer changelog", prev_fixer) if prev_fixer else "")
                    + (section("Previous Tester findings", prev_tester) if prev_tester else ""))
         analyst, engines_used["analyst"] = run_role(
             "analyst", render("analyst.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=a_prior),
             itdir / "05", workspace, "read_only", cfg, timeout, run_dir,
-            exclude_families=writer_families(), events=events)
+            exclude_families=writer_families(), events=events, accept=analyst_shape)
         (itdir / "05-analyst.md").write_text(analyst)
-        analyst_pass = verdict(analyst, "VERDICT") == "PASS"
+        # a report kept despite failing the shape check can never count as PASS
+        analyst_pass = analyst_shape(analyst) and verdict(analyst, "VERDICT") == "PASS"
 
         # Fixer (only if there is something to fix)
         needs_fix = (not analyst_pass) or (prev_tester is not None and not prev_tester_pass)
+        fixer = None
         if needs_fix:
             f_prior = (section("Analyst findings", analyst)
-                       + (section("Tester findings", prev_tester) if prev_tester else ""))
+                       + (section("Tester findings", prev_tester) if prev_tester else "")
+                       + (section("Previous Fixer changelog", prev_fixer) if prev_fixer else ""))
             fixer, engines_used["fixer"] = run_role(
                 "fixer", render("fixer.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=f_prior),
                 itdir / "06", workspace, "write", cfg, timeout, run_dir)
             (itdir / "06-fixer.md").write_text(fixer)
 
         # Tester (executes; may add scaffolding)
-        t_prior = section("Architecture", arch) + section("Latest Analyst findings", analyst)
+        t_prior = (section("Architecture", arch) + section("Latest Analyst findings", analyst)
+                   + (section("Fixer changelog this iteration", fixer) if fixer else ""))
         tester, engines_used["tester"] = run_role(
             "tester", render("tester.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=t_prior),
-            itdir / "07", workspace, "write", cfg, timeout, run_dir)
+            itdir / "07", workspace, "write", cfg, timeout, run_dir, events=events, accept=tester_shape)
         (itdir / "07-tester.md").write_text(tester)
         tester_pass = verdict(tester, "RESULT") == "PASS"
         for ev in family_overlap_events(cfg, engines_used, it):
@@ -476,37 +674,31 @@ def cmd_run(args):
             events.append(ev)
 
         prev_tester, prev_tester_pass = tester, tester_pass
+        prev_analyst = analyst
+        if fixer:
+            prev_fixer = fixer  # last changelog that actually ran; survives Fixer-less iterations
         history.append({"iter": it, "analyst_pass": analyst_pass,
                         "tester_pass": tester_pass, "fixer_ran": needs_fix})
         log(run_dir, f"iter {it}: analyst={'PASS' if analyst_pass else 'FAIL'} "
                      f"tester={'PASS' if tester_pass else 'FAIL'}")
         if analyst_pass and tester_pass:
             break
+        # Stall stop: two families agree that every remaining failure is environment-blocked
+        # (Analyst: zero NOT MET / NOT VERIFIED and >=1 BLOCKED criterion; Fixer: a `BLOCKED:`
+        # line under `## Not fixed` — not under `## Fixed`, where it would describe an unblocking).
+        marks = criteria_marks(analyst)
+        if (marks["blocked"] and marks["not_met"] == 0 and fixer
+                and blocked_items(section_text(fixer, "Not fixed")) and cfg.get("stop_when_blocked", True)):
+            blocked = all_blocked(marks["blocked"], fixer, tester)
+            stalled = True
+            log(run_dir, f"iter {it}: every remaining failure is BLOCKED by the environment — stopping early")
+            break
 
     converged = analyst_pass and tester_pass
-    result = {
-        "run_id": run_dir.name,
-        "status": "passed" if converged else "max_iters_reached",
-        "converged": converged,
-        "iterations": it,
-        "max_iters": max_iters,
-        "history": history,
-        "engines_used": engines_used,
-        "guard_events": events,
-        "workspace": str(workspace),
-        "run_dir": str(run_dir),
-        "artifacts": {
-            "brief": str(run_dir / "brief.md"),
-            "researcher": str(run_dir / "02-researcher.md"),
-            "architect": str(run_dir / "03-architect.md"),
-            "coder": str(run_dir / "04-coder.md"),
-            "final_iter": str(run_dir / f"iter-{it}"),
-        },
-    }
-    (run_dir / "result.json").write_text(json.dumps(result, indent=2))
-    maybe_log_durable(cfg, run_dir, result, brief)
-    log(run_dir, f"=== CoThink run done: {result['status']} after {it} iter(s) ===")
-    print(json.dumps(result, indent=2))
+    if not converged and not stalled:
+        blocked = all_blocked(criteria_marks(analyst)["blocked"], fixer, tester)
+    finish("passed" if converged else ("blocked" if stalled else "max_iters_reached"),
+           it, history, converged)
 
 
 def main():
@@ -520,6 +712,8 @@ def main():
     pr = sub.add_parser("run", help="run roles 2-7 over a run dir containing brief.md")
     pr.add_argument("--run-dir", required=True)
     pr.add_argument("--workspace", default="", help="defaults to <run-dir>/workspace")
+    pr.add_argument("--no-halt-on-blocked", action="store_true",
+                    help="record the Architect's BLOCKED items in result.json but keep building")
     pr.set_defaults(func=cmd_run)
 
     args = ap.parse_args()
