@@ -8,7 +8,10 @@ Tester loop). See SKILL.md for how the conductor drives this.
 Engines (validated headless commands, verified 2026-08):
   gemini : gemini --mode {accept-edits|plan} --output-format text [--add-dir WS] -p <prompt>
   kimi   : kimi --quiet -w <ws> {--yolo|--plan} -p <prompt>          (--quiet => clean final message)
-  codex  : codex exec -C <ws> --skip-git-repo-check -s {workspace-write|read-only}
+  claude : claude -p <prompt> --output-format text --no-session-persistence --strict-mcp-config
+           {write: --dangerously-skip-permissions | plan: --permission-mode plan | read_only: dontAsk + read tools}
+           (IS_SANDBOX=1; via claude-acct when installed) — optional middle-role engine
+  codex  : codex-acct exec -C <ws>  (codex-acct = multi-account dispatcher; falls back to codex) --skip-git-repo-check -s {workspace-write|read-only}
            --output-last-message <file> <prompt>   (leave models.codex empty: ChatGPT-account auth
            rejects *-codex model ids, and the CLI's own default is current, e.g. gpt-5.6-sol)
   grok   : grok -p <prompt> --output-format plain --no-alt-screen --cwd <ws> [--always-approve]
@@ -19,6 +22,7 @@ Subcommands:
   run    --run-dir DIR [--workspace WS] -> run roles 2-7; writes artifacts + result.json
 """
 import argparse
+import shutil
 import datetime
 import json
 import os
@@ -93,8 +97,10 @@ def strip_gemini(text):
 # --------------------------------------------------------------------------- #
 def _run(cmd, cwd, timeout, out_file=None):
     try:
+        # Never inherit stdin: `codex exec` blocks forever ("Reading additional input from
+        # stdin...") when it sees an open non-TTY pipe, e.g. when the driver runs in the background.
         p = subprocess.run(cmd, cwd=str(cwd), capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return "", False, f"timeout after {timeout}s"
     except FileNotFoundError as e:
@@ -121,9 +127,47 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
     is_write = (mode == "write")
     ws = str(workspace) if workspace else str(role_dir)
 
+    if engine == "claude":
+        # Claude as a middle-role engine. CoThink is always driven FROM Claude Code, so
+        # Claude Code -> claude CLI is the allowed direction (never the reverse). Spread
+        # across the Claude fleet via claude-acct when installed; COTHINK_CLAUDE_BIN overrides.
+        # Isolation: no session written to the (shared) session store, no MCP servers, no
+        # user/project settings or hooks leaking in from the conductor's own setup.
+        # IS_SANDBOX=1 is the documented hatch that lets --dangerously-skip-permissions run as root.
+        claude_bin = os.environ.get("COTHINK_CLAUDE_BIN") or ("claude-acct" if shutil.which("claude-acct") else "claude")
+        cmd = ["env", "IS_SANDBOX=1", claude_bin, "-p", prompt, "--output-format", "text",
+               "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]
+        if is_write:
+            cmd += ["--dangerously-skip-permissions"]
+        elif mode == "plan":
+            cmd += ["--permission-mode", "plan", "--permission-prompts", "none"]
+        else:  # read_only: read tools + read-only shell; anything that would prompt is denied
+            cmd += ["--permission-mode", "dontAsk", "--permission-prompts", "none"]
+        if models.get("claude"):
+            cmd += ["--model", models["claude"]]  # pin FULL ids (claude-fable-5-1), not aliases
+        if workspace:
+            cmd += ["--add-dir", str(workspace)]
+        if not is_write and mode != "plan":
+            # read tools + shell; dontAsk denies anything that would prompt, so explicitly allow the
+            # test runner (an Analyst that cannot run the suite can only guess). Variadic flags: last.
+            cmd += ["--tools", "Read,Glob,Grep,Bash",
+                    "--allowedTools", "Bash(pytest *)", "Bash(python3 -m pytest *)"]
+        out, ok, err = _run(cmd, ws, timeout)
+        return out.strip(), ok, err
+
     if engine == "gemini":
-        cmd = ["gemini", "--output-format", "text",
+        # Antigravity CLI (agy) flags. --print-timeout defaults to 5m, far below a role's budget.
+        # Headless, the shell ("command") tool needs a permission nobody can grant, so a turn that
+        # reaches for it is CANCELED with empty output. Write mode skips permissions (it needs to
+        # run tests). Read-only mode must NOT: with permissions skipped, --mode plan happily writes
+        # files (verified). So read-only calls keep plan mode and are told the shell is unavailable.
+        cmd = ["gemini", "--output-format", "text", "--print-timeout", f"{int(timeout)}s",
                "--mode", "accept-edits" if is_write else "plan"]
+        if is_write:
+            cmd += ["--dangerously-skip-permissions"]
+        else:
+            prompt = ("NOTE: shell/terminal commands are NOT available in this session — use your file "
+                      "read, grep/search and web tools only; never call a run-command tool.\n\n" + prompt)
         if models.get("gemini"):
             cmd += ["--model", models["gemini"]]
         if workspace:
@@ -133,19 +177,40 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return strip_gemini(out), ok, err
 
     if engine == "kimi":
+        # In --plan mode kimi writes the full blueprint to ~/.kimi/plans/<name>.md and prints only a
+        # short summary, so harvest any plan file created during this call and prefer it when longer.
+        # (Caveat: --plan is porous in print mode — ExitPlanMode is auto-approved — so a plan/read_only
+        # kimi role can still write into its cwd; keep read-only roles on engines with real deny rules.)
+        plans_dir = Path.home() / ".kimi" / "plans"
+        before = {p: p.stat().st_mtime for p in plans_dir.glob("*.md")} if plans_dir.is_dir() else {}
+        t_start = time.time()
         cmd = ["kimi", "--quiet", "-w", ws, ("--yolo" if is_write else "--plan")]
         if models.get("kimi"):
             cmd += ["-m", models["kimi"]]
         cmd += ["-p", prompt]
         out, ok, err = _run(cmd, ws, timeout)
-        return out.strip(), ok, err
+        out = out.strip()
+        if not is_write and plans_dir.is_dir():
+            new_plans = [p for p in plans_dir.glob("*.md")
+                         if p.stat().st_mtime >= t_start - 1 and p.stat().st_mtime > before.get(p, 0)]
+            if new_plans:
+                plan_text = max(new_plans, key=lambda p: p.stat().st_mtime).read_text().strip()
+                if len(plan_text) > len(out):
+                    out = plan_text + ("\n\n---\n" + out if out else "")
+        return out, ok, err
 
     if engine == "codex":
         out_file = role_dir / "_codex_last.txt"
         if out_file.exists():
             out_file.unlink()
-        cmd = ["codex", "exec", "-C", ws, "--skip-git-repo-check",
+        # Route through the codex-acct dispatcher when installed (spreads load across the
+        # ChatGPT accounts); COTHINK_CODEX_BIN overrides; plain `codex` otherwise.
+        codex_bin = os.environ.get("COTHINK_CODEX_BIN") or ("codex-acct" if shutil.which("codex-acct") else "codex")
+        cmd = [codex_bin, "exec", "-C", ws, "--skip-git-repo-check",
                "-s", ("workspace-write" if is_write else "read-only")]
+        effort = cfg.get("codex_reasoning_effort")
+        if effort:  # per-call override; the accounts' own config.toml is untouched
+            cmd += ["-c", f'model_reasoning_effort="{effort}"']
         if models.get("codex"):
             cmd += ["-m", models["codex"]]
         cmd += ["--output-last-message", str(out_file), prompt]
@@ -153,20 +218,28 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         return out.strip(), ok, err
 
     if engine == "grok":
+        # Headless grok has nobody to answer permission prompts: in the default "ask" mode (and in
+        # dontAsk / plan modes) the turn is CANCELLED silently on the first gated tool call and only a
+        # preamble comes back. So every mode auto-approves, and read_only/plan add deny rules: verified
+        # that Write/Edit tools AND shell redirects (`echo x > f`) are refused ("deny rule on edit")
+        # while shell reads (wc, find, cat) still run.
         cmd = ["grok", "-p", prompt, "--output-format", "plain",
-               "--no-alt-screen", "--cwd", ws]
-        if is_write:
-            cmd += ["--always-approve"]
+               "--no-alt-screen", "--cwd", ws, "--no-memory", "--always-approve"]
+        if not is_write:
+            cmd += ["--deny", "Write", "--deny", "Edit"]
         if models.get("grok"):
             cmd += ["-m", models["grok"]]
         out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
     if engine == "vibe":
+        # vibe has no --model flag (its model lives in ~/.vibe/config.toml); models.vibe is ignored.
+        # It is the only pay-per-token engine with a hard spend cap, so apply one per call.
         cmd = ["vibe", "-p", prompt, "--output", "text", "--workdir", ws,
                *(["--auto-approve"] if is_write else ["--agent", "plan"])]
-        if models.get("vibe"):
-            cmd += ["--model", models["vibe"]]
+        max_price = cfg.get("vibe_max_price_usd")
+        if max_price:
+            cmd += ["--max-price", str(max_price)]
         out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
@@ -192,29 +265,87 @@ def _looks_failed(out, ok):
     return any(m in out for m in HARD_ERRORS)
 
 
-def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir):
-    """Run a role on its configured engine, falling back if it fails."""
-    pref = cfg["roles"][role]["engine"]
-    fb = cfg.get("fallbacks", {}).get(pref, [])
+def _family(cfg, engine):
+    """Model family of an engine (config.families), used for the independence guard."""
+    return (cfg.get("families") or {}).get(engine, engine)
+
+
+def role_chain(cfg, role):
+    """Ordered engine list for a role: its primary, then its own fallback chain
+    (roles.<role>.fallbacks). Legacy per-engine tables (fallbacks.<engine>) still work
+    for configs that predate per-role chains."""
+    rc = cfg["roles"][role]
+    pref = rc["engine"]
+    fb = rc.get("fallbacks")
+    if fb is None:
+        fb = cfg.get("fallbacks", {}).get(pref, [])
     if isinstance(fb, str):  # accept a single engine or an ordered chain
         fb = [fb]
     order = [pref]
     for e in fb:
         if e and e not in order:
             order.append(e)
+    return order
+
+
+def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
+             exclude_families=(), events=None):
+    """Run a role on its configured engine, falling back down its chain if it fails.
+
+    mode comes from roles.<role>.mode when set (the caller's value is the default).
+    exclude_families: model families that must not play this role in this run — the
+    Analyst must never share a family with whatever actually wrote the code. Excluded
+    engines are skipped and logged; if nothing independent is left the run proceeds on an
+    excluded engine with a loud warning (recorded in `events`) rather than dying.
+    Returns (output, engine_that_ran) — engine is "none" if every engine failed.
+    """
+    rc = cfg["roles"][role]
+    pref = rc["engine"]
+    mode = rc.get("mode") or mode
+    order = role_chain(cfg, role)
+    excluded = [e for e in order if exclude_families and _family(cfg, e) in exclude_families]
+    independent = [e for e in order if e not in excluded]
+    for e in excluded:
+        log(run_dir, f"{role}: skipping {e} — same model family ({_family(cfg, e)}) as the code writer")
     last_err = ""
-    for eng in order:
-        log(run_dir, f"{role}: {eng} (mode={mode}) ...")
-        out, ok, err = run_engine(eng, prompt, role_dir, workspace, mode, cfg, timeout)
-        if not _looks_failed(out, ok):
-            if eng != pref:
-                out = f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n" + out
-            log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
-            return out, eng
-        last_err = (err or out or "")[:300]
-        log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
+    for tier, engines in (("independent", independent), ("violation", excluded)):
+        for eng in engines:
+            if tier == "violation":
+                log(run_dir, f"{role}: WARNING no independent engine left; running {eng} despite family overlap")
+                if events is not None:
+                    events.append({"role": role, "engine": eng, "event": "family_guard_violation"})
+            log(run_dir, f"{role}: {eng} (mode={mode}) ...")
+            out, ok, err = run_engine(eng, prompt, role_dir, workspace, mode, cfg, timeout)
+            if not _looks_failed(out, ok):
+                banner = ""
+                if eng != pref:
+                    banner += f"_[CoThink fallback: {pref} unavailable, ran on {eng}]_\n\n"
+                if tier == "violation":
+                    banner += (f"_[CoThink WARNING: {role} ran on {eng}, the same model family as the "
+                               f"code writer — this verdict is not independent]_\n\n")
+                log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
+                return banner + out, eng
+            last_err = (err or out or "")[:300]
+            log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
     return (f"[CoThink] {role} failed on all engines ({', '.join(order)}). "
             f"Last error: {last_err}"), "none"
+
+
+def family_overlap_events(cfg, engines_used, it):
+    """Correlated-verdict notes for one iteration: the Tester sharing a model family with the
+    Analyst, or with whoever actually wrote the code (Coder/Fixer). Soft losses — logged, never fatal."""
+    ev = []
+    t = engines_used.get("tester")
+    if not t or t == "none":
+        return ev
+    tf = _family(cfg, t)
+    a = engines_used.get("analyst")
+    if a and a != "none" and _family(cfg, a) == tf:
+        ev.append({"role": "tester", "engine": t, "event": "analyst_tester_same_family", "iter": it})
+    writers = [e for e in (engines_used.get("coder"), engines_used.get("fixer")) if e and e != "none"]
+    if any(_family(cfg, w) == tf for w in writers):
+        ev.append({"role": "tester", "engine": t, "event": "writer_tester_same_family", "iter": it})
+    return ev
 
 
 def verdict(text, key):
@@ -270,6 +401,11 @@ def cmd_run(args):
     timeout = int(cfg.get("timeout_seconds", 1800))
     max_iters = int(cfg.get("max_iters", 3))
     engines_used = {}
+    events = []  # independence-guard events, surfaced in result.json
+
+    def writer_families():
+        return {_family(cfg, e) for e in (engines_used.get("coder"), engines_used.get("fixer"))
+                if e and e != "none"}
 
     log(run_dir, f"=== CoThink run start: {run_dir.name} (workspace={workspace}) ===")
 
@@ -277,7 +413,7 @@ def cmd_run(args):
     research, engines_used["researcher"] = run_role(
         "researcher",
         render("researcher.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=""),
-        run_dir / "02", None, "read_only", cfg, timeout, run_dir)
+        run_dir / "02", workspace, "read_only", cfg, timeout, run_dir)
     (run_dir / "02-researcher.md").write_text(research)
 
     # Role 3 — Architect
@@ -285,7 +421,7 @@ def cmd_run(args):
         "architect",
         render("architect.md", BRIEF=brief, WORKSPACE=workspace,
                PRIOR=section("Research / Fact Base", research)),
-        run_dir / "03", None, "plan", cfg, timeout, run_dir)
+        run_dir / "03", workspace, "read_only", cfg, timeout, run_dir)
     (run_dir / "03-architect.md").write_text(arch)
 
     # Role 4 — Coder
@@ -312,7 +448,8 @@ def cmd_run(args):
                    + (section("Previous Tester findings", prev_tester) if prev_tester else ""))
         analyst, engines_used["analyst"] = run_role(
             "analyst", render("analyst.md", BRIEF=brief, WORKSPACE=workspace, PRIOR=a_prior),
-            itdir / "05", workspace, "read_only", cfg, timeout, run_dir)
+            itdir / "05", workspace, "read_only", cfg, timeout, run_dir,
+            exclude_families=writer_families(), events=events)
         (itdir / "05-analyst.md").write_text(analyst)
         analyst_pass = verdict(analyst, "VERDICT") == "PASS"
 
@@ -333,6 +470,10 @@ def cmd_run(args):
             itdir / "07", workspace, "write", cfg, timeout, run_dir)
         (itdir / "07-tester.md").write_text(tester)
         tester_pass = verdict(tester, "RESULT") == "PASS"
+        for ev in family_overlap_events(cfg, engines_used, it):
+            log(run_dir, f"iter {it}: NOTE {ev['event'].replace('_', ' ')} ({ev['engine']}) — "
+                         f"the verdicts are correlated, not independent")
+            events.append(ev)
 
         prev_tester, prev_tester_pass = tester, tester_pass
         history.append({"iter": it, "analyst_pass": analyst_pass,
@@ -351,6 +492,7 @@ def cmd_run(args):
         "max_iters": max_iters,
         "history": history,
         "engines_used": engines_used,
+        "guard_events": events,
         "workspace": str(workspace),
         "run_dir": str(run_dir),
         "artifacts": {
