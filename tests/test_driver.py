@@ -141,6 +141,20 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(cothink.verdict("no verdict here", "VERDICT"), "FAIL")
         self.assertEqual(cothink.verdict(None, "VERDICT"), "FAIL")
 
+    def test_verdict_contract_shapes_from_the_corpus(self):
+        # a quoted test summary before the real line must not win (7/102 real Tester reports look like this)
+        self.assertEqual(cothink.verdict("Result: passed, `18 passed`\n...\nRESULT: FAIL", "RESULT"), "FAIL")
+        # kimi habit: the whole line wrapped in bold or backticks still parses (10 real occurrences)
+        for line in ("**VERDICT: PASS**", "`VERDICT: PASS`"):
+            self.assertEqual(cothink.verdict(line, "VERDICT"), "PASS")
+            self.assertTrue(cothink.analyst_shape("## Criteria check\n1. MET — x\n" + line))
+        # decoration INSIDE the line is off-contract (0 real occurrences): stays FAIL and fails the shape gate
+        for line in ("VERDICT: **PASS**", "**VERDICT:** PASS"):
+            self.assertEqual(cothink.verdict(line, "VERDICT"), "FAIL")
+            self.assertFalse(cothink.analyst_shape("## Criteria check\n1. MET — x\n" + line))
+        for line in ("RESULT: **PASS**", "**RESULT:** PASS"):
+            self.assertFalse(cothink.tester_shape(line))
+
 
 class CommandShapeTests(unittest.TestCase):
     """Check what the driver would shell out, without shelling out."""

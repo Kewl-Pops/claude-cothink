@@ -21,8 +21,9 @@ Strategist(Claude Code) → Researcher(Gemini) → Architect(Claude) → Coder(C
 ```
 
 > **Scope:** this repo is the runnable, **coding-focused 8-role distillation** of the broader
-> CoThink methodology. The same idea generalizes to larger role sets for non-code work (writing,
-> strategy, etc.) — this is the lean, installable subset you can run today in Claude Code.
+> CoThink methodology: success criteria must be checkable headlessly inside a workspace, and the
+> Analyst/Tester contracts assume runnable code (`file:line`, `Repro:`). It is the lean, installable
+> subset you can run today in Claude Code.
 
 ## The 8 roles
 
@@ -93,7 +94,7 @@ fleet dispatchers).
 - [`grok`](https://docs.x.ai/) (Grok CLI) — logged in
 - [`vibe`](https://github.com/mistralai/mistral-vibe) — `MISTRAL_API_KEY` set
 - [`qwen`](https://github.com/QwenLM/qwen-code) — provider key in `~/.qwen/.env`
-- Python 3.8+ (standard library only — no pip dependencies)
+- Python 3.10+ (standard library only — no pip dependencies)
 
 Any engine you don't have can simply be left out of `config.json`; each role's fallback chain keeps
 a run alive when one CLI is missing, broken, or out of quota.
@@ -117,7 +118,8 @@ python3 ~/.claude/skills/cothink/cothink.py doctor        # add --json for a mac
 ```
 
 `doctor` spends no tokens. It checks that every engine the config can reach (primaries **and**
-per-role fallback chains, dispatchers first) is on `PATH` and answers `--version`, prints the
+per-role fallback chains, dispatchers first) is on `PATH` and that the underlying CLI answers
+`--version` (probed directly, never through the fleet dispatchers), prints the
 role → engine map with each chain, and enforces the config invariants: every referenced engine
 has a family, every chain has at least one installed engine, no judgment seat (Analyst, Tester)
 sits on the Coder's family, and model pins look sane (a full Claude id, no `*-codex` id, no

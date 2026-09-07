@@ -13,10 +13,13 @@ class P:
         self.stdout, self.stderr, self.returncode = out, "", rc
 
 
-def fake_env(present, versions=None):
+def fake_env(present, versions=None, probed=None):
     versions = versions or {}
     which = lambda c: f"/usr/bin/{c}" if c in present else None
-    run = lambda cmd, **kw: P(versions.get(cmd[0], cmd[0] + " 9.9"))
+    def run(cmd, **kw):
+        if probed is not None:
+            probed.append(cmd[0])
+        return P(versions.get(cmd[0], cmd[0] + " 9.9"))
     return which, run
 
 
@@ -31,6 +34,7 @@ class DoctorTests(unittest.TestCase):
         by = {e["engine"]: e for e in r["engines"]}
         self.assertEqual(by["claude"]["binary"], "/usr/bin/claude-acct")  # dispatcher preferred
         self.assertEqual(by["codex"]["binary"], "/usr/bin/codex-acct")
+        self.assertIn("via claude-acct", by["claude"]["detail"]); self.assertIn("via codex-acct", by["codex"]["detail"])
         self.assertIn("architect (primary)", by["claude"]["roles"]); self.assertIn("analyst (fallback)", by["claude"]["roles"])
         self.assertEqual(r["roles"]["analyst"]["chain"], ["grok", "claude", "gemini", "kimi"])
         self.assertEqual(r["settings"]["stop_when_blocked"], True)
@@ -40,6 +44,29 @@ class DoctorTests(unittest.TestCase):
         which = lambda c: c if c.startswith("/") else (f"/usr/bin/{c}" if c in ALL else None)
         r = cothink.doctor_report(REPO_CFG, which=which, run=run, env={"COTHINK_CLAUDE_BIN": "/opt/my-claude"})
         self.assertEqual({e["engine"]: e["binary"] for e in r["engines"]}["claude"], "/opt/my-claude")
+
+    def test_probe_hits_the_underlying_cli_not_the_dispatcher(self):
+        probed = []
+        which, run = fake_env(ALL | {"claude", "codex"}, probed=probed)
+        cothink.doctor_report(REPO_CFG, which=which, run=run, env={"CLAUDE_ACCT_BIN": "/opt/claude-real"})
+        self.assertNotIn("claude-acct", probed); self.assertNotIn("codex-acct", probed)
+        self.assertIn("/opt/claude-real", probed); self.assertIn("codex", probed)
+
+    def test_engine_binary_matches_run_engine_and_gemini_never_resolves_to_agy(self):
+        which = lambda c: c in {"claude-acct", "codex", "agy"}
+        self.assertEqual(cothink.engine_binary("claude", env={}, which=which), "claude-acct")
+        self.assertEqual(cothink.engine_binary("codex", env={}, which=which), "codex")
+        self.assertEqual(cothink.engine_binary("gemini", env={}, which=which), "gemini")
+        self.assertEqual(cothink.engine_binary("claude", env={"COTHINK_CLAUDE_BIN": "/x/claude"}, which=which), "/x/claude")
+        r = cothink.doctor_report(REPO_CFG, which=lambda c: f"/usr/bin/{c}" if c in (ALL - {"gemini"}) | {"agy"} else None,
+                                  run=lambda cmd, **kw: P(), env={})
+        self.assertFalse(r["ok"]); self.assertTrue(any("gemini: not on PATH" in p and "expose it as `gemini`" in p for p in r["problems"]))
+
+    def test_fixer_family_counts_as_a_writer(self):
+        which, run = fake_env(ALL)
+        cfg = json.loads(json.dumps(REPO_CFG)); cfg["roles"]["fixer"]["engine"] = "grok"  # grok = analyst primary
+        r = cothink.doctor_report(cfg, which=which, run=run, env={})
+        self.assertFalse(r["ok"]); self.assertTrue(any("analyst: chain contains grok" in p and "Fixer (grok)" in p for p in r["problems"]))
 
     def test_plain_binaries_when_dispatchers_absent(self):
         which, run = fake_env((ALL - {"claude-acct", "codex-acct"}) | {"claude", "codex"})

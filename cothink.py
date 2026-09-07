@@ -211,6 +211,33 @@ def strip_gemini(text):
 # --------------------------------------------------------------------------- #
 # Engine invocation
 # --------------------------------------------------------------------------- #
+# Engine -> (dispatcher-first binary candidates, env override). run_engine and doctor resolve
+# binaries through engine_binary() so the preflight checks exactly what a run would exec.
+ENGINE_BINS = {
+    "claude": (["claude-acct", "claude"], "COTHINK_CLAUDE_BIN"),
+    "codex": (["codex-acct", "codex"], "COTHINK_CODEX_BIN"),
+    "gemini": (["gemini"], None),   # the Antigravity CLI must be exposed as `gemini` (agy alone is not enough)
+    "kimi": (["kimi"], None),
+    "grok": (["grok"], None),
+    "vibe": (["vibe"], None),
+    "qwen": (["qwen"], None),
+}
+# what a dispatcher wraps, for --version probes that must not route/spend anything
+DISPATCHER_UNDERLYING = {"claude-acct": ("CLAUDE_ACCT_BIN", "claude"), "codex-acct": ("CODEX_ACCT_BIN", "codex")}
+
+
+def engine_binary(engine, env=os.environ, which=shutil.which):
+    """argv[0] a run would exec for this engine: the env override if set, else the first candidate
+    on PATH (dispatchers first), else the plain name (so a missing CLI fails visibly at exec)."""
+    cands, env_key = ENGINE_BINS.get(engine, ([engine], None))
+    if env_key and env.get(env_key):
+        return env[env_key]
+    for c in cands:
+        if which(c):
+            return c
+    return cands[-1]
+
+
 def _run(cmd, cwd, timeout, out_file=None):
     try:
         # Never inherit stdin: `codex exec` blocks forever ("Reading additional input from
@@ -250,7 +277,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         # Isolation: no session written to the (shared) session store, no MCP servers, no
         # user/project settings or hooks leaking in from the conductor's own setup.
         # IS_SANDBOX=1 is the documented hatch that lets --dangerously-skip-permissions run as root.
-        claude_bin = os.environ.get("COTHINK_CLAUDE_BIN") or ("claude-acct" if shutil.which("claude-acct") else "claude")
+        claude_bin = engine_binary("claude")
         cmd = ["env", "IS_SANDBOX=1", claude_bin, "-p", prompt, "--output-format", "text",
                "--no-session-persistence", "--strict-mcp-config", "--setting-sources", ""]
         if is_write:
@@ -326,7 +353,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
             out_file.unlink()
         # Route through the codex-acct dispatcher when installed (spreads load across the
         # ChatGPT accounts); COTHINK_CODEX_BIN overrides; plain `codex` otherwise.
-        codex_bin = os.environ.get("COTHINK_CODEX_BIN") or ("codex-acct" if shutil.which("codex-acct") else "codex")
+        codex_bin = engine_binary("codex")
         cmd = [codex_bin, "exec", "-C", ws, "--skip-git-repo-check",
                "-s", ("workspace-write" if is_write else "read-only")]
         effort = cfg.get("codex_reasoning_effort")
@@ -497,16 +524,6 @@ def verdict(text, key):
 # --------------------------------------------------------------------------- #
 # doctor — preflight
 # --------------------------------------------------------------------------- #
-# Engine -> binaries in preference order (dispatchers first, as run_engine picks them), env override.
-ENGINE_BINS = {
-    "claude": (["claude-acct", "claude"], "COTHINK_CLAUDE_BIN"),
-    "codex": (["codex-acct", "codex"], "COTHINK_CODEX_BIN"),
-    "gemini": (["gemini", "agy"], None),
-    "kimi": (["kimi"], None),
-    "grok": (["grok"], None),
-    "vibe": (["vibe"], None),
-    "qwen": (["qwen"], None),
-}
 MODES = ("read_only", "plan", "write")
 
 
@@ -533,33 +550,36 @@ def doctor_report(cfg, which=shutil.which, run=subprocess.run, env=os.environ):
 
     engines = []
     for eng in sorted(needed):
-        cands, env_key = ENGINE_BINS.get(eng, ([eng], None))
-        if env_key and env.get(env_key):
-            cands = [env[env_key]] + cands
-        path = detail = None
-        for c in cands:
-            path = which(c)
-            if path:
-                try:
-                    pr = run([c, "--version"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
-                    first = ((pr.stdout or pr.stderr or "").strip().splitlines() or ["found"])[0][:60]
-                    detail = first if pr.returncode == 0 else f"exit {pr.returncode}: {first}"
-                except (subprocess.TimeoutExpired, OSError) as e:
-                    detail = f"probe failed: {e}"
-                break
+        binary = engine_binary(eng, env=env, which=which)   # exactly what run_engine would exec
+        path = which(binary)
+        detail = None
+        if path:
+            # probe the CLI itself, never through a dispatcher (that would route and bump its state)
+            probe_bin, via = binary, ""
+            if os.path.basename(binary) in DISPATCHER_UNDERLYING:
+                env_key, default = DISPATCHER_UNDERLYING[os.path.basename(binary)]
+                probe_bin, via = env.get(env_key, default), f" via {os.path.basename(binary)}"
+            try:
+                pr = run([probe_bin, "--version"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
+                first = ((pr.stdout or pr.stderr or "").strip().splitlines() or ["found"])[0][:60]
+                detail = (first if pr.returncode == 0 else f"exit {pr.returncode}: {first}") + via
+            except (subprocess.TimeoutExpired, OSError) as e:
+                detail = f"probe failed: {e}{via}"
         uses = sorted(needed[eng])
         is_primary = any(k == "primary" for k, _ in uses)
         status = "OK" if path else "MISSING"
         if not path:
+            cands = ENGINE_BINS.get(eng, ([eng], None))[0]
+            hint = " (agy is installed — expose it as `gemini`, e.g. a shim or symlink)" if eng == "gemini" and which("agy") else ""
             (problems if is_primary else warnings).append(
-                f"{eng}: not on PATH (tried {', '.join(cands)}) — "
+                f"{eng}: not on PATH (tried {', '.join(cands)}){hint} — "
                 + ("primary for " + ", ".join(r for k, r in uses if k == "primary") if is_primary
                    else "fallback only (" + ", ".join(r for _, r in uses) + ")"))
         if eng not in families:
             problems.append(f"{eng}: referenced by roles but missing from config.families")
         if eng not in ENGINE_BINS:
             problems.append(f"{eng}: unknown engine (no run_engine branch)")
-        engines.append({"engine": eng, "binary": path or cands[0], "status": status, "detail": detail or "",
+        engines.append({"engine": eng, "binary": path or binary, "status": status, "detail": detail or "",
                         "model": models.get(eng) or "(CLI default)", "family": families.get(eng, "?"),
                         "roles": [f"{r} ({k})" for k, r in uses]})
 
@@ -572,16 +592,17 @@ def doctor_report(cfg, which=shutil.which, run=subprocess.run, env=os.environ):
         if rc.get("mode") not in MODES:
             problems.append(f"{role}: mode {rc.get('mode')!r} is not one of {MODES}")
 
-    # family independence: the builder's family must not sit in a judgment seat
+    # family independence: no writer's family (Coder or Fixer primary) may sit in a judgment seat
     fam = lambda e: families.get(e, e)
-    coder = roles.get("coder", {}).get("engine")
-    if coder:
-        for role in ("analyst", "tester"):
-            same = [e for e in chain(role) if fam(e) == fam(coder)]
+    writers = {roles.get(r, {}).get("engine") for r in ("coder", "fixer")} - {None}
+    for role in ("analyst", "tester"):
+        for w in sorted(writers):
+            same = [e for e in chain(role) if fam(e) == fam(w)]
             if same:
-                (problems if roles.get(role, {}).get("engine") in same else warnings).append(
-                    f"{role}: chain contains {', '.join(same)} — same family ({fam(coder)}) as the Coder"
-                    + ("" if roles.get(role, {}).get("engine") in same else " (fallback only; the runtime guard skips it)"))
+                primary_hit = roles.get(role, {}).get("engine") in same
+                (problems if primary_hit else warnings).append(
+                    f"{role}: chain contains {', '.join(same)} — same family ({fam(w)}) as the {'Coder' if w == roles.get('coder', {}).get('engine') else 'Fixer'} ({w})"
+                    + ("" if primary_hit else " (fallback only; the runtime guard skips it)"))
 
     # model pins
     cm = models.get("claude") or ""
