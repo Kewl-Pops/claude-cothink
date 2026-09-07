@@ -188,6 +188,20 @@ def criteria_marks(analyst_text):
     return {"not_met": not_met, "blocked": blocked}
 
 
+CLAUDE_LIMIT_RE = re.compile(r"out of usage credits|usage limit|rate.?limit|hit your (session|usage|5.?hour|weekly) limit"
+                             r"|too many requests|\b429\b|limit reached", re.I)
+
+
+def log_stderr(msg):
+    print(f"[cothink] {msg}", file=sys.stderr)
+
+
+def normalize_headings(text):
+    """grok's plain output glues streamed narration onto the report's first heading
+    ("...then report.## Prior findings"); give every `## `/`### ` heading its own line."""
+    return re.sub(r"(?<=[^\n])(?=#{2,3} [A-Z])", "\n", (text or "").strip())
+
+
 def strip_gemini(text):
     keep = [ln for ln in (text or "").splitlines() if not GEMINI_NOISE.search(ln)]
     return "\n".join(keep).strip()
@@ -254,6 +268,11 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
             cmd += ["--tools", "Read,Glob,Grep,Bash",
                     "--allowedTools", "Bash(pytest *)", "Bash(python3 -m pytest *)"]
         out, ok, err = _run(cmd, ws, timeout)
+        if not ok and CLAUDE_LIMIT_RE.search((out or "") + (err or "")):
+            # the account the dispatcher picked has no credits/quota for this model (a pinned Fable id
+            # on a team seat, a spent 5h window): the dispatcher cools it down, so one retry lands elsewhere
+            log_stderr(f"claude: limit/credits signature from the picked account — retrying once via {claude_bin}")
+            out, ok, err = _run(cmd, ws, timeout)
         return out.strip(), ok, err
 
     if engine == "gemini":
@@ -331,7 +350,7 @@ def run_engine(engine, prompt, role_dir, workspace, mode, cfg, timeout):
         if models.get("grok"):
             cmd += ["-m", models["grok"]]
         out, ok, err = _run(cmd, ws, timeout)
-        return out.strip(), ok, err
+        return normalize_headings(out), ok, err
 
     if engine == "vibe":
         # vibe has no --model flag (its model lives in ~/.vibe/config.toml); models.vibe is ignored.
@@ -436,7 +455,9 @@ def run_role(role, prompt, role_dir, workspace, mode, cfg, timeout, run_dir,
             if not failed:
                 log(run_dir, f"{role}: {eng} done ({len(out)} chars)")
                 return banner + out, eng
-            last_err = (err or out or "")[:300]
+            # keep both streams: dispatchers print only a routing line on stderr while the CLI's
+            # real error (e.g. "out of usage credits") lands on stdout
+            last_err = " | ".join(x.strip() for x in (err, out) if x and x.strip())[:300]
             log(run_dir, f"{role}: {eng} FAILED -> {last_err!r}")
     if malformed is not None:  # a real report with the wrong headings beats a failure banner
         out, eng = malformed

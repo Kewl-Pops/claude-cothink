@@ -100,6 +100,14 @@ class ChainTests(unittest.TestCase):
         self.assertEqual(eng, "none")
         self.assertIn("failed on all engines", out)
 
+    def test_failure_log_keeps_stdout_error_when_stderr_is_only_a_routing_line(self):
+        def fake(engine, *a):
+            return "You're out of usage credits. Switch to another model.", False, "[claude-acct] -> acct4 @ 0.0%"
+        cothink.run_engine = fake
+        cothink.run_role("architect", "p", self.run_dir / "03", None, "read_only", REPO_CFG, 10, self.run_dir)
+        logged = (self.run_dir / "run.log").read_text()
+        self.assertIn("out of usage credits", logged); self.assertIn("[claude-acct] -> acct4", logged)
+
 
 class OverlapAndSubprocessTests(unittest.TestCase):
     def test_family_overlap_events(self):
@@ -167,6 +175,29 @@ class CommandShapeTests(unittest.TestCase):
         c = self.cmd("codex", "read_only")
         self.assertIn('model_reasoning_effort="high"', c); self.assertIn("read-only", c)
         self.assertIn("workspace-write", self.cmd("codex", "write"))
+
+    def test_grok_headings_get_their_own_line(self):
+        self.assertEqual(cothink.normalize_headings("I will inspect.## Prior findings\nNone\n## Defects\nNone"),
+                         "I will inspect.\n## Prior findings\nNone\n## Defects\nNone")
+        self.assertEqual(cothink.normalize_headings("## Defects\nNone\nsee c## 3"), "## Defects\nNone\nsee c## 3")
+        self.assertEqual(cothink.normalize_headings(None), "")
+
+    def test_claude_retries_once_on_a_credits_or_limit_signature(self):
+        calls = []
+        def fake_run(cmd, cwd, timeout, out_file=None):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return "You're out of usage credits. Switch to another model.", False, "[claude-acct] -> acct4"
+            return "pong", True, "[claude-acct] -> acct3"
+        cothink._run = fake_run
+        out, ok, err = cothink.run_engine("claude", "p", Path(self.tmp.name), None, "read_only", REPO_CFG, 60)
+        self.assertEqual((out, ok), ("pong", True)); self.assertEqual(len(calls), 2)
+        calls.clear()
+        def fake_run2(cmd, cwd, timeout, out_file=None):
+            calls.append(cmd); return "", False, "some other crash"
+        cothink._run = fake_run2
+        out, ok, err = cothink.run_engine("claude", "p", Path(self.tmp.name), None, "read_only", REPO_CFG, 60)
+        self.assertFalse(ok); self.assertEqual(len(calls), 1)  # no retry without a limit signature
 
     def test_grok_read_only_denies_writes(self):
         c = self.cmd("grok", "read_only")
